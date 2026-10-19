@@ -3,6 +3,7 @@ import csv
 import json
 import math
 import queue
+import secrets
 import select
 import socket
 import struct
@@ -13,6 +14,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .depth_protocol import Reassembler
+
+# Text transport only: no device command semantics are defined here.
+MESSAGE_MAGIC = b"PDMSG1"
+MESSAGE_ACK_MAGIC = b"PDACK1"
+MESSAGE_HEADER = struct.Struct("<6sI")
+MESSAGE_MAX_BYTES = 512
+MESSAGE_ACK_TIMEOUT = 2.0
+
+
+def encode_message(message_id, text):
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("请输入要发送的消息。")
+    if "\0" in text:
+        raise ValueError("消息不能包含 NUL 字符。")
+    payload = text.encode("utf-8")
+    if len(payload) > MESSAGE_MAX_BYTES:
+        raise ValueError(f"消息最多 {MESSAGE_MAX_BYTES} 字节，当前为 {len(payload)} 字节（UTF-8）。")
+    return MESSAGE_HEADER.pack(MESSAGE_MAGIC, message_id) + payload
 
 
 def utc_now():
@@ -29,6 +48,17 @@ def parse_power(packet):
     for key in ("voltage_v", "current_a", "power_w"):
         if not isinstance(obj.get(key), (int, float)) or not math.isfinite(obj[key]):
             raise ValueError("Invalid power value")
+    rssi_valid = obj.get("rssi_valid", False)
+    rssi_dbm = obj.get("rssi_dbm")
+    if not isinstance(rssi_valid, bool):
+        raise ValueError("Invalid RSSI validity flag")
+    if rssi_valid:
+        if not isinstance(rssi_dbm, int) or isinstance(rssi_dbm, bool) or not -127 <= rssi_dbm <= 0:
+            raise ValueError("Invalid RSSI value")
+    else:
+        rssi_dbm = None
+    obj["rssi_valid"] = rssi_valid
+    obj["rssi_dbm"] = rssi_dbm
     return obj
 
 
@@ -137,7 +167,7 @@ class CaptureRecorder:
                 pw = csv.writer(power_file)
                 dw = csv.writer(depth_file)
                 pw.writerow(("host_utc", "board", "session", "seq", "timestamp_ms",
-                             "voltage_v", "current_a", "power_w"))
+                             "voltage_v", "current_a", "power_w", "rssi_dbm", "rssi_valid"))
                 dw.writerow(("host_utc", "board", "session", "seq", "camera_ms",
                              "format", "payload_size", "c6_rx_ms", "c6_queue_ms",
                              "reassembly_ms", "bin_file", "pgm_file"))
@@ -149,7 +179,8 @@ class CaptureRecorder:
                     if kind == "power":
                         pw.writerow((host_utc, source, value["session"], value["seq"],
                                      value["timestamp_ms"], value["voltage_v"],
-                                     value["current_a"], value["power_w"]))
+                                     value["current_a"], value["power_w"],
+                                     value["rssi_dbm"], value["rssi_valid"]))
                         self.power += 1
                     else:
                         stem = (f"{source.replace('.', '_')}_{value['session']:08x}_"
@@ -188,12 +219,65 @@ class UdpReceiver:
         self.port = port
         self.discovery_port = discovery_port
         self.stop_event = threading.Event()
+        self.ready = threading.Event()
+        self.outgoing_messages = queue.Queue(maxsize=16)
         self.thread = threading.Thread(target=self._run, name="deck-udp", daemon=True)
         self.thread.start()
 
     def stop(self):
         self.stop_event.set()
         self.thread.join(timeout=1.0)
+
+    def send_message(self, text):
+        """Queue one UTF-8 datagram; the worker owns socket I/O and ACK waiting."""
+        message_id = secrets.randbits(32)
+        packet = encode_message(message_id, text)
+        if self.stop_event.is_set() or not self.ready.is_set() or not self.thread.is_alive():
+            raise ValueError("请先连接 Power Deck。")
+        if not self.board or self.board == "255.255.255.255":
+            raise ValueError("请等待自动发现设备，或填写 C6 IP 后重新连接。")
+        try:
+            self.outgoing_messages.put_nowait((message_id, packet))
+        except queue.Full:
+            raise ValueError("消息发送队列已满，请稍后重试。") from None
+        return message_id
+
+    def _send_messages(self, sock, pending):
+        # Bound work per loop so text traffic does not starve frame reception.
+        for _ in range(min(4, 16 - len(pending))):
+            try:
+                message_id, packet = self.outgoing_messages.get_nowait()
+            except queue.Empty:
+                break
+            endpoint = (self.board, self.discovery_port)
+            try:
+                if sock.sendto(packet, endpoint) != len(packet):
+                    raise OSError("UDP datagram was not sent in full")
+            except OSError as exc:
+                self._event("message_error", dict(id=message_id, error=str(exc)))
+                continue
+            pending[message_id] = dict(endpoint=endpoint,
+                                       deadline=time.monotonic() + MESSAGE_ACK_TIMEOUT,
+                                       bytes=len(packet) - MESSAGE_HEADER.size)
+            self._event("message_sent", dict(id=message_id, board=endpoint[0],
+                                               bytes=len(packet) - MESSAGE_HEADER.size))
+
+    def _receive_message_ack(self, raw, address, pending):
+        if len(raw) != MESSAGE_HEADER.size:
+            raise ValueError("Invalid message ACK length")
+        magic, message_id = MESSAGE_HEADER.unpack(raw)
+        if magic != MESSAGE_ACK_MAGIC:
+            raise ValueError("Invalid message ACK magic")
+        item = pending.get(message_id)
+        if item is not None and address == item["endpoint"]:
+            del pending[message_id]
+            self._event("message_ack", dict(id=message_id, board=address[0], bytes=item["bytes"]))
+
+    def _expire_messages(self, pending, now):
+        for message_id, item in list(pending.items()):
+            if now >= item["deadline"]:
+                del pending[message_id]
+                self._event("message_timeout", dict(id=message_id, board=item["endpoint"][0]))
 
     def _event(self, kind, value):
         try:
@@ -205,6 +289,7 @@ class UdpReceiver:
     def _run(self):
         reassembler = Reassembler()
         sequence_loss = SequenceLossEstimator()
+        pending_messages = {}
         power_count = invalid = discovery_errors = ui_dropped = 0
         previous = 0
         try:
@@ -213,6 +298,7 @@ class UdpReceiver:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
                 sock.bind(("0.0.0.0", self.port))
                 sock.setblocking(False)
+                self.ready.set()
                 self._event("listening", f"0.0.0.0:{self.port}")
                 next_hello = 0.0
                 next_report = time.monotonic() + 1.0
@@ -225,6 +311,7 @@ class UdpReceiver:
                         except OSError:
                             discovery_errors += 1
                         next_hello = now + 1.0
+                    self._send_messages(sock, pending_messages)
                     readable, _, _ = select.select([sock], [], [], 0.03)
                     if readable:
                         for _ in range(256):
@@ -238,6 +325,9 @@ class UdpReceiver:
                             arrival = time.monotonic()
                             host_utc = utc_now()
                             try:
+                                if raw.startswith(MESSAGE_ACK_MAGIC):
+                                    self._receive_message_ack(raw, address, pending_messages)
+                                    continue
                                 if raw.startswith(b"{"):
                                     sample = parse_power(raw)
                                     self._select_discovered_board(source)
@@ -263,6 +353,7 @@ class UdpReceiver:
                                 invalid += 1
                     now = time.monotonic()
                     reassembler.expire(now)
+                    self._expire_messages(pending_messages, now)
                     if now >= next_report:
                         complete = reassembler.stats["complete"]
                         elapsed = now - (next_report - 1.0)
@@ -279,6 +370,7 @@ class UdpReceiver:
         except OSError as exc:
             self._event("error", f"UDP 接收失败：{exc}")
         finally:
+            self.ready.clear()
             self._event("stopped", None)
 
     def _select_discovered_board(self, source):

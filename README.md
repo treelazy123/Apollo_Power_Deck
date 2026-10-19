@@ -10,7 +10,7 @@ INA226 ──I²C──> ESP32-C6 power_sample_task ──> 功耗样本队列 �
 STM32F103 模拟帧 ──SPI──> ESP32-C6 depth_rx_task ──> 深度帧缓存/队列 ──> depth_udp ─┘
 ```
 
-`power_sample_task` 每 100 ms 读取 INA226；`depth_rx_task` 按设定周期向 STM32 请求一帧，通过 SPI 接收并校验 DPT1 帧；`net_tx_task` 管理队列和发送次序。功耗 JSON 与深度帧由独立的 `power_udp`、`depth_udp` 模块发送。电脑向 C6 的 UDP 5006 发送 `PDHELLO1`，C6 使用发现到的电脑 IP 和端口单播回传。电脑接收端监听 UDP 5005。
+`power_sample_task` 每 100 ms 读取 INA226；`depth_rx_task` 按设定周期向 STM32 请求一帧，通过 SPI 接收并校验 DPT1 帧；`net_tx_task` 管理队列和发送次序。独立的 `net_rx_task`（`main/Src/net_rx.c`）监听 UDP 5006，处理电脑发现、文本消息、接收确认和连接租约；`net_tx_task` 通过线程安全的状态快照取得电脑目的地址。功耗 JSON 与深度帧由独立的 `power_udp`、`depth_udp` 模块发送。电脑向 C6 的 UDP 5006 发送 `PDHELLO1`，C6 使用发现到的电脑 IP 和端口单播回传。电脑接收端监听 UDP 5005。 功耗 JSON 还携带 `rssi_dbm` 和 `rssi_valid`：RSSI 是 C6 读取到的热点信号强度（dBm），无连接时 `rssi_valid` 为 `false`；上位机显示并记录该值。
 
 ## 仓库内容
 
@@ -18,7 +18,7 @@ STM32F103 模拟帧 ──SPI──> ESP32-C6 depth_rx_task ──> 深度帧缓
 |---|---|
 | `main/` | ESP-IDF 固件，包括 WiFi、INA226、SPI 接收、UDP 模块和 FreeRTOS 任务 |
 | `camera_spi_mock/` | STM32F103C8T6 摄像头模拟固件、CMake 工程和 DPT1 协议说明 |
-| `tool/` | Python 接收器、桌面上位机、帧解析器和工具说明 |
+| `tool/` | GUI、GUI 网络后端、深度帧解析器和使用说明 |
 | `bench_artifacts/` | 不同测试载荷模式的预编译 C6 与 STM32 固件 |
 | `sdkconfig`、根目录 `CMakeLists.txt` | ESP-IDF 工程配置 |
 
@@ -60,7 +60,7 @@ C6 再将完整 DPT1 帧切成最多 1,200 字节的数据片，每片添加 40 
 
 ### 更改帧格式
 
-修改格式时，先将 C6 和 STM32 的格式号改成相同值，然后分别重新构建和烧录两端固件。电脑解析器目前仅接受表中三种固定长度和 48×48 布局。增加真实摄像头的分辨率、像素布局或帧长时，必须同步更新 C6 校验、电脑 `tool/src/power_deck_tool/depth_protocol.py` 解析逻辑及预览方式。
+修改格式时，先将 C6 和 STM32 的格式号改成相同值，然后分别重新构建和烧录两端固件。电脑解析器目前仅接受表中三种固定长度和 48×48 布局。增加真实摄像头的分辨率、像素布局或帧长时，必须同步更新 C6 校验、电脑 `tool/src/depth_protocol.py` 解析逻辑及预览方式。
 
 `bench_artifacts/` 用于快速复现三种测试载荷的吞吐测试，不是运行上位机所需文件，也不是摄像头驱动。不要混用不同格式的 C6 和 STM32 镜像。测试镜像地址和基准测试方法见下文“吞吐基准测试模式”；优先使用正常构建流程生成当前固件。
 
@@ -129,13 +129,7 @@ C6 IP 留空时尝试局域网发现；也可以指定地址：
 uv run deck-gui --board 192.168.137.66
 ```
 
-终端接收器可代替 GUI：
-
-```powershell
-uv run deck-receiver --board 192.168.137.66 --view --save ..\captures
-```
-
-GUI 和终端接收器都占用电脑 UDP 5005，不能同时运行。Windows 防火墙需允许本程序接收 UDP 5005；如果广播发现被网络隔离，手动填写 C6 IP。
+GUI 监听电脑 UDP 5005。Windows 防火墙需允许本程序接收 UDP 5005；如果广播发现被网络隔离，手动填写 C6 IP。
 
 GUI 显示最近 60 秒的电压、电流、功率曲线、深度预览、帧率和接收统计。开始记录后，在指定目录下创建新文件夹，保存 `power.csv`、`depth.csv`、每帧原始 `.bin`，以及格式 1/2 的 `.pgm` 深度图。格式 3 载荷布局未知，所以只保存 `.bin`，不生成深度预览。
 
@@ -147,7 +141,9 @@ GUI 显示最近 60 秒的电压、电流、功率曲线、深度预览、帧率
 
 统计按设备 IP 和 C6 session 分开；最近的乱序帧会在有限窗口内修正。该估算只覆盖本次 session 首个与最新有效帧之间的序号范围，不计开始前或结束后的未知帧，也不能区分 C6 主动丢帧和 WiFi/UDP 丢帧。GUI 上的 `incomplete` 表示电脑端分片重组超时，不等同于总丢帧率。
 
-目前 GUI 的“帧类型/重新烧录”和“WiFi 指令”是界面预留项，尚未实现烧录与指令发送。
+接收模块独立为 `main/Src/net_rx.c` / `main/Inc/net_rx.h`，拥有自己的 UDP socket 和 `net_rx_task`，由 `stream_tasks_start()` 与其他任务一起使用 `xTaskCreate()` 统一创建；任务优先级为 4，栈分配为 3072 字节。`depth_udp.c` 只负责深度帧封装与发送，`net_tx_task` 不再调用接收轮询。串口每秒输出 `net_rx messages/ack_err=... stack_free=...`，用于观察累计消息数、确认发送失败数和接收任务栈余量。
+
+GUI 的“WiFi 消息”支持向已连接的 C6 发送任意 UTF-8 文本（最多 512 字节）。C6 收到后在串口输出 `PC message ... text=...` 并返回接收确认，上位机显示“板端已接收”；2 秒未确认时显示超时。消息和发现复用 UDP 5006，数据及确认返回电脑原有 UDP 5005。此功能只传递文本，不解析或执行设备指令。“帧类型/重新烧录”仍为界面预留项。启用消息接收需重新构建并烧录当前 C6 固件，旧的基准镜像不支持该功能。
 
 ## 调试与验证
 

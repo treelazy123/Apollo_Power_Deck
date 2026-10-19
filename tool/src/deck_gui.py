@@ -45,7 +45,7 @@ def depth_ppm(frame, max_mm=3000):
 
 class PowerChart(tk.Canvas):
     def __init__(self, parent):
-        super().__init__(parent, bg=PANEL, highlightthickness=0, height=205)
+        super().__init__(parent, bg=PANEL, highlightthickness=0, height=190)
         self.samples = deque(maxlen=900)
         self.bind("<Configure>", lambda _event: self.redraw())
 
@@ -56,7 +56,7 @@ class PowerChart(tk.Canvas):
     def redraw(self):
         self.delete("all")
         width = max(self.winfo_width(), 350)
-        height = max(self.winfo_height(), 205)
+        height = max(self.winfo_height(), 190)
         left, right = 74, width-18
         top, bottom = 14, height-20
         slot = (bottom-top)/3
@@ -128,11 +128,14 @@ class DeckApp:
         self.voltage_var = tk.StringVar(value="— V")
         self.current_var = tk.StringVar(value="— A")
         self.power_var = tk.StringVar(value="— W")
+        self.rssi_var = tk.StringVar(value="— dBm")
         self.save_root_var = tk.StringVar(value="Documents/PowerDeckCaptures")
         self.folder_var = tk.StringVar(value=self._suggest_folder())
         self.format_var = tk.StringVar(value="float32 深度")
         self.firmware_var = tk.StringVar()
         self.command_var = tk.StringVar()
+        self.message_status_var = tk.StringVar(value="连接后可发送任意文本（最多 512 字节）。")
+        self.pending_message_id = None
         self.port_var = tk.StringVar()
         self._build()
         self._update_firmware_hint()
@@ -149,9 +152,10 @@ class DeckApp:
         options.update(kwargs)
         return tk.Label(parent, text=text, **options)
 
-    def _panel(self, parent, title):
-        frame = tk.Frame(parent, bg=PANEL, padx=18, pady=16)
-        self._label(frame, title, font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 12))
+    def _panel(self, parent, title, compact=False):
+        frame = tk.Frame(parent, bg=PANEL, padx=18, pady=4 if compact else 16)
+        self._label(frame, title, font=("Segoe UI", 11 if compact else 14, "bold")).pack(
+            anchor="w", pady=(0, 4 if compact else 12))
         return frame
 
     def _entry(self, parent, variable, width=18):
@@ -199,17 +203,18 @@ class DeckApp:
         metrics.pack(fill="x", pady=(14, 0))
         for col, (title, var, color) in enumerate((("电压", self.voltage_var, TEAL),
                                                     ("电流", self.current_var, BLUE),
-                                                    ("功率", self.power_var, AMBER))):
-            card = tk.Frame(metrics, bg=PANEL_ALT, padx=12, pady=8)
+                                                    ("功率", self.power_var, AMBER),
+                                                    ("WiFi RSSI", self.rssi_var, RED))):
+            card = tk.Frame(metrics, bg=PANEL_ALT, padx=8, pady=8)
             card.pack(side="left", fill="x", expand=True,
-                      padx=(0, 8) if col < 2 else (0, 0))
+                      padx=(0, 6) if col < 3 else (0, 0))
             self._label(card, title, fg=MUTED).pack(anchor="w")
             self._label(card, textvariable=var, fg=color,
                         font=("Consolas", 16, "bold")).pack(anchor="w")
         right = self._panel(content, "深度视频  /  48 × 48")
         right.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
         self.video = tk.Label(right, text="等待深度图像", bg="#0f1929", fg=MUTED,
-                              font=("Segoe UI", 15), width=36, height=8)
+                              font=("Segoe UI", 15), width=36, height=7)
         self.video.pack(fill="both", expand=True)
         self.video_image = None
         self._label(right, textvariable=self.frame_var, fg=MUTED,
@@ -237,7 +242,7 @@ class DeckApp:
 
         future = tk.Frame(bottom, bg=BG)
         future.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
-        firmware = self._panel(future, "帧类型 / 重新烧录   ·   前端预留")
+        firmware = self._panel(future, "帧类型 / 重新烧录   ·   前端预留", compact=True)
         firmware.pack(fill="x")
         mode_row = tk.Frame(firmware, bg=PANEL)
         mode_row.pack(fill="x")
@@ -250,14 +255,19 @@ class DeckApp:
         tk.Button(mode_row, text="重新烧录", state="disabled", padx=9).pack(side="right")
         self._label(firmware, textvariable=self.firmware_var, fg=MUTED,
                     wraplength=420, justify="left").pack(anchor="w", pady=(8, 0))
-        commands = self._panel(future, "WiFi 指令   ·   前端预留")
+        commands = self._panel(future, "WiFi 消息", compact=True)
         commands.pack(fill="x", pady=(10, 0))
         cmd_row = tk.Frame(commands, bg=PANEL)
         cmd_row.pack(fill="x")
-        self._entry(cmd_row, self.command_var, 32).pack(side="left", fill="x", expand=True, ipady=5)
-        tk.Button(cmd_row, text="发送指令", state="disabled", padx=9).pack(side="left", padx=(8, 0))
-        self._label(commands, "指令协议尚未接入；此处不会向设备发送数据。",
-                    fg=MUTED).pack(anchor="w", pady=(8, 0))
+        message_entry = self._entry(cmd_row, self.command_var, 32)
+        message_entry.pack(side="left", fill="x", expand=True, ipady=5)
+        message_entry.bind("<Return>", lambda _event: self.send_message())
+        self.send_button = self._button(cmd_row, "发送消息", self.send_message)
+        self.send_button.configure(state="disabled")
+        self.send_button.pack(side="left", padx=(8, 0))
+        self._label(commands, textvariable=self.message_status_var, fg=MUTED,
+                    wraplength=420, justify="left", height=2,
+                    anchor="w").pack(anchor="w", pady=(8, 0))
 
         footer = tk.Frame(self.root, bg=BG, padx=24, pady=9)
         footer.pack(fill="x")
@@ -284,6 +294,9 @@ class DeckApp:
             self.receiver = None
             self.connect_button.configure(text="连接")
             self.status_var.set("已断开")
+            self.pending_message_id = None
+            self.message_status_var.set("已断开；未确认的消息请在板端串口核对。")
+            self._refresh_send_button()
             return
         board = self.board_var.get().strip()
         if board:
@@ -295,9 +308,32 @@ class DeckApp:
                 messagebox.showerror("C6 IP 无效", "请输入 C6 的 IPv4 地址，或留空自动发现。")
                 return
         self.receiver_error = False
+        self.pending_message_id = None
+        self.message_status_var.set("等待连接设备…")
         self.receiver = UdpReceiver(board, self.events, self._get_recorder)
         self.connect_button.configure(text="断开")
         self.status_var.set(f"正在连接 {board}…")
+
+    def _refresh_send_button(self):
+        available = (self.receiver is not None and self.receiver.ready.is_set()
+                     and not self.receiver.stop_event.is_set()
+                     and bool(self.receiver.board) and self.receiver.board != "255.255.255.255"
+                     and self.pending_message_id is None)
+        self.send_button.configure(state="normal" if available else "disabled")
+
+    def send_message(self):
+        if self.pending_message_id is not None:
+            return
+        if self.receiver is None:
+            self.message_status_var.set("请先连接 Power Deck。")
+            return
+        try:
+            self.pending_message_id = self.receiver.send_message(self.command_var.get())
+        except ValueError as exc:
+            self.message_status_var.set(str(exc))
+            return
+        self.message_status_var.set("消息已排队，等待板端接收确认…")
+        self._refresh_send_button()
 
     def toggle_recording(self):
         if self.recorder is not None:
@@ -342,6 +378,7 @@ class DeckApp:
                 self.voltage_var.set(f"{sample['voltage_v']:.3f} V")
                 self.current_var.set(f"{sample['current_a']:.3f} A")
                 self.power_var.set(f"{sample['power_w']:.3f} W")
+                self.rssi_var.set(f"{sample['rssi_dbm']} dBm" if sample.get("rssi_valid") else "— dBm")
             elif kind == "frame":
                 newest = payload
                 self.last_packet_at = payload[0]
@@ -354,16 +391,39 @@ class DeckApp:
                     f"(\u4e71\u5e8f {s['seq_reordered']})  \u754c\u9762\u8df3\u8fc7 {s['ui_dropped']}")
             elif kind == "listening":
                 self.status_var.set(f"监听 {payload} · 正在发现设备")
+                if self.pending_message_id is None:
+                    self.message_status_var.set("可发送任意文本（最多 512 字节）。" if self.receiver and self.receiver.board
+                                                else "等待自动发现 Power Deck…")
             elif kind == "discovered":
                 self.board_var.set(payload)
                 self.status_var.set(f"已自动发现 {payload} · 正在接收")
+                if self.pending_message_id is None:
+                    self.message_status_var.set("可发送任意文本（最多 512 字节）。")
+            elif kind in ("message_sent", "message_ack", "message_error", "message_timeout"):
+                if payload["id"] != self.pending_message_id:
+                    continue
+                if kind == "message_sent":
+                    self.message_status_var.set(f"已发送 {payload['bytes']} 字节，等待板端确认…")
+                else:
+                    self.pending_message_id = None
+                    if kind == "message_ack":
+                        self.message_status_var.set(
+                            f"板端已接收 {payload['bytes']} 字节 · {payload['board']}")
+                    elif kind == "message_timeout":
+                        self.message_status_var.set("2 秒内未收到确认，请检查板端固件和串口。")
+                    else:
+                        self.message_status_var.set(f"发送失败：{payload['error']}")
             elif kind == "error":
+                self.receiver_error = True
+                self.pending_message_id = None
+                self.message_status_var.set("连接出错，请重新连接后发送。")
                 self.status_var.set(payload)
                 messagebox.showerror("连接错误", payload)
                 self.receiver = None
                 self.connect_button.configure(text="连接")
             elif kind == "stopped" and self.receiver is None and not self.receiver_error:
                 self.status_var.set("已断开")
+        self._refresh_send_button()
         if newest:
             stamp, source, frame = newest
             self.latest_frame = frame

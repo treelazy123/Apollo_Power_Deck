@@ -5,7 +5,7 @@
 #define POWER_WIFI_SSID              "myssid"
 #define POWER_WIFI_PASSWORD          "mypassword"
 
-/* Streaming: PC sends PDHELLO1 to this port; data returns to its source port. */
+/* PC sends PDHELLO1/text to this port; stream data and text ACKs return to its source port. */
 #define STREAM_DISCOVERY_PORT       5006
 #define STREAM_PEER_LEASE_MS        5000
 #define POWER_SAMPLE_PERIOD_MS     100

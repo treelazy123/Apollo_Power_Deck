@@ -8,11 +8,13 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "esp_random.h"
 #include "esp_heap_caps.h"
 #include "Inc/deck_config.h"
 #include "Inc/power_udp.h"
 #include "Inc/depth_udp.h"
+#include "Inc/net_rx.h"
 #include "Inc/ina226.h"
 #include "Inc/i2c.h"
 #include "Inc/wifi_sta.h"
@@ -22,7 +24,7 @@ static const char *TAG="stream";
 static QueueHandle_t power_q,free_q,ready_q;
 static bool sensor_ready;
 static uint32_t session;
-static TaskHandle_t power_handle,depth_handle,net_handle;
+static TaskHandle_t power_handle,depth_handle,net_handle,net_rx_handle;
 typedef struct { uint8_t *data; uint32_t rx_ms,seq; } Frame;
 static Frame frames[DEPTH_FRAME_COUNT];
 typedef struct {
@@ -31,7 +33,7 @@ typedef struct {
     uint32_t depth_spi_error,depth_header_error,depth_crc_error,depth_payload_error;
     uint32_t last_spi_err,last_bad_word0,last_bad_word1;
     uint32_t drop_ready_full,drop_no_wifi,drop_no_receiver,drop_stale,drop_udp;
-    uint32_t peer_expired,peer_wifi_lost,last_send_errno;
+    uint32_t last_send_errno;
     uint32_t last_drop_seq,last_drop_age_ms,last_drop_offset;
     uint32_t pool_used,pool_peak,power_peak,ready_peak,spi_us_max;
 } Stats;
@@ -73,6 +75,9 @@ static void power_sample_task(void *arg)
             sample.voltage_v=ina226_voltage(I2C_CONTROLLER_0);
             sample.current_a=ina226_current(I2C_CONTROLLER_0);
             sample.power_w=ina226_power(I2C_CONTROLLER_0);
+            wifi_ap_record_t ap_info;
+            sample.rssi_valid = esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK;
+            sample.rssi_dbm = sample.rssi_valid ? ap_info.rssi : 0;
             if(isfinite(sample.voltage_v)&&isfinite(sample.current_a)&&isfinite(sample.power_w)) {
                 COUNT(power_ok);
                 if(xQueueSend(power_q,&sample,0)!=pdTRUE) COUNT(power_drop);
@@ -158,12 +163,9 @@ static void net_tx_task(void *arg)
             if (!power_ready) record_send_error((errno != 0) ? errno : EIO);
         }
         bool wifi_connected = wifi_sta_connected();
-        bool wifi_lost = false;
-        bool peer_expired = false;
-        depth_udp_poll(wifi_connected, now, &wifi_lost, &peer_expired);
-        if (wifi_lost) COUNT(peer_wifi_lost);
-        if (peer_expired) COUNT(peer_expired);
-        bool have_peer = depth_udp_has_peer();
+        net_rx_status_t rx;
+        net_rx_get_status(&rx);
+        bool have_peer = wifi_connected && rx.have_peer;
 
         if (!have_peer && active >= 0) {
             Frame *frame = &frames[active];
@@ -176,12 +178,9 @@ static void net_tx_task(void *arg)
         /* At most one power sample precedes each depth fragment. */
         power_sample_t sample;
         if (xQueueReceive(power_q, &sample, 0) == pdTRUE) {
-            uint32_t peer_ipv4_be;
-            uint16_t peer_port;
             int send_errno = 0;
             if (power_ready && have_peer &&
-                depth_udp_peer_endpoint(&peer_ipv4_be, &peer_port) &&
-                power_udp_send(&sample, session, peer_ipv4_be, peer_port,
+                power_udp_send(&sample, session, rx.peer_ipv4_be, rx.peer_port,
                                &send_errno)) {
                 COUNT(power_sent);
             } else {
@@ -212,7 +211,8 @@ static void net_tx_task(void *arg)
                 int send_errno = 0;
                 if (!depth_udp_send_depth_chunk(frame->data, DEPTH_FRAME_BYTES,
                         session, frame->seq, frame->rx_ms, frame_age,
-                        offset, &sent_bytes, &send_errno)) {
+                        offset, rx.peer_ipv4_be, rx.peer_port,
+                        &sent_bytes, &send_errno)) {
                     if (send_errno) record_send_error(send_errno);
                     record_drop(DROP_UDP, frame->seq, frame_age, offset);
                     release_frame((uint8_t)active);
@@ -236,6 +236,8 @@ static void stats_task(void *arg)
     (void)arg;
     for(;;) {
         vTaskDelay(ticks(1000)); Stats s;
+        net_rx_status_t rx;
+        net_rx_get_status(&rx);
         portENTER_CRITICAL(&stats_lock); s=stats; portEXIT_CRITICAL(&stats_lock);
         ESP_LOGI(TAG,"power ok/err/drop/tx=%lu/%lu/%lu/%lu depth ok/err/no_buf/drop/tx=%lu/%lu/%lu/%lu/%lu send_err=%lu pool=%lu peak=%lu power_q_peak=%lu ready_peak=%lu spi_cycle_max_us=%lu heap=%u min=%u dma_block=%u stacks=%u/%u/%u",
             (unsigned long)s.power_ok,(unsigned long)s.power_error,(unsigned long)s.power_drop,(unsigned long)s.power_sent,
@@ -251,10 +253,13 @@ static void stats_task(void *arg)
         ESP_LOGI(TAG,"drop_reason ready_full/no_wifi/no_receiver/stale/udp=%lu/%lu/%lu/%lu/%lu peer_expired=%lu peer_wifi_lost=%lu last_send_errno=%lu last_drop seq/age_ms/offset=%lu/%lu/%lu",
             (unsigned long)s.drop_ready_full,(unsigned long)s.drop_no_wifi,
             (unsigned long)s.drop_no_receiver,(unsigned long)s.drop_stale,
-            (unsigned long)s.drop_udp,(unsigned long)s.peer_expired,
-            (unsigned long)s.peer_wifi_lost,(unsigned long)s.last_send_errno,
+            (unsigned long)s.drop_udp,(unsigned long)rx.peer_expired,
+            (unsigned long)rx.peer_wifi_lost,(unsigned long)s.last_send_errno,
             (unsigned long)s.last_drop_seq,(unsigned long)s.last_drop_age_ms,
             (unsigned long)s.last_drop_offset);
+        ESP_LOGI(TAG,"net_rx messages/ack_err=%lu/%lu stack_free=%u",
+            (unsigned long)rx.messages_received,(unsigned long)rx.ack_errors,
+            (unsigned)uxTaskGetStackHighWaterMark(net_rx_handle));
     }
 }
 void stream_tasks_start(bool power_sensor_ready)
@@ -272,6 +277,7 @@ void stream_tasks_start(bool power_sensor_ready)
         frames[i].data=heap_caps_malloc(DEPTH_FRAME_BYTES,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
         if(!frames[i].data || xQueueSend(free_q,&i,0)!=pdTRUE) abort();
     }
+    if(xTaskCreate(net_rx_task,"net_rx",3072,NULL,4,&net_rx_handle)!=pdPASS) abort();
     if(xTaskCreate(power_sample_task,"power_sample",3072,NULL,5,&power_handle)!=pdPASS) abort();
     if(xTaskCreate(depth_rx_task,"depth_rx",4096,NULL,6,&depth_handle)!=pdPASS) abort();
     if(xTaskCreate(net_tx_task,"net_tx",5120,NULL,4,&net_handle)!=pdPASS) abort();

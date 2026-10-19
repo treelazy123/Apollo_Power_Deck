@@ -39,9 +39,11 @@ bool power_udp_send(const power_sample_t *sample, uint32_t session,
     int length = snprintf(payload, sizeof(payload),
         "{\"type\":\"power\",\"session\":%" PRIu32
         ",\"seq\":%" PRIu32 ",\"timestamp_ms\":%" PRId64
-        ",\"voltage_v\":%.6f,\"current_a\":%.6f,\"power_w\":%.6f}",
+        ",\"voltage_v\":%.6f,\"current_a\":%.6f,\"power_w\":%.6f"
+        ",\"rssi_dbm\":%d,\"rssi_valid\":%s}",
         session, sample->sequence, sample->timestamp_ms,
-        sample->voltage_v, sample->current_a, sample->power_w);
+        sample->voltage_v, sample->current_a, sample->power_w,
+        sample->rssi_dbm, sample->rssi_valid ? "true" : "false");
     if (length < 0 || length >= (int)sizeof(payload)) {
         if (send_errno) *send_errno = EMSGSIZE;
         return false;

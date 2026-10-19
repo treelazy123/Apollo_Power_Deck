@@ -10,6 +10,8 @@ typedef struct {
     float voltage_v;
     float current_a;
     float power_w;
+    int16_t rssi_dbm;
+    bool rssi_valid;
 } power_sample_t;
 
 bool power_udp_init(void);

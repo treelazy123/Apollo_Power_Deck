@@ -1,4 +1,4 @@
-"""PDK1 UDP fragments and DPT1 synthetic depth/opaque benchmark frames."""
+"""PDK1 fragment reassembly and DPT1 depth decoding for the desktop GUI."""
 import math
 import struct
 import zlib
@@ -108,12 +108,3 @@ class Reassembler:
                      c6_queue_ms=item["max_queue_ms"], reassembly_ms=(now-item["start"])*1000)
         self.stats["complete"] += 1
         return frame
-
-
-def fragment_frame(raw, session=1, rx_ms=100, queue_ms=0):
-    """Reference encoder used by integration tests and the simulated board."""
-    seq = decode_frame(raw)["seq"]
-    count = (len(raw)+CHUNK-1)//CHUNK
-    return [HEADER.pack(b"PDK1", 1, 2, 40, session, seq, len(raw), off,
-                        len(raw[off:off+CHUNK]), off//CHUNK, count, 0, rx_ms, queue_ms)
-            + raw[off:off+CHUNK] for off in range(0, len(raw), CHUNK)]
