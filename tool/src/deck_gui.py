@@ -22,25 +22,9 @@ TEAL = "#51d6c5"
 BLUE = "#74a8ff"
 AMBER = "#ffbf69"
 RED = "#ff7183"
-FORMATS = {"u16 + 状态": (1, "u16_status"),
-           "float32 深度": (2, "float"),
-           "原始字节帧": (3, "raw")}
-
-
-def depth_ppm(frame, max_mm=3000):
-    """Build a colourized PPM image from a validated 48x48 depth frame."""
-    if frame["pixels"] is None:
-        return None
-    colors = bytearray()
-    for depth, valid in frame["pixels"]:
-        if not valid:
-            colors.extend((9, 17, 30))
-            continue
-        t = min(1.0, max(0.0, depth / max_mm))
-        colors.extend((int(240 * (1-t) + 15),
-                       int(190 * (1-abs(2*t-1)) + 30),
-                       int(220 * t + 25)))
-    return f"P6\n{frame['width']} {frame['height']}\n255\n".encode() + colors
+FORMATS = {"不透明字节 · 6912 B": 1,
+           "不透明字节 · 9216 B": 2,
+           "不透明字节 · 14900 B": 3}
 
 
 class PowerChart(tk.Canvas):
@@ -131,7 +115,7 @@ class DeckApp:
         self.rssi_var = tk.StringVar(value="— dBm")
         self.save_root_var = tk.StringVar(value="Documents/PowerDeckCaptures")
         self.folder_var = tk.StringVar(value=self._suggest_folder())
-        self.format_var = tk.StringVar(value="float32 深度")
+        self.format_var = tk.StringVar(value="不透明字节 · 14900 B")
         self.firmware_var = tk.StringVar()
         self.command_var = tk.StringVar()
         self.message_status_var = tk.StringVar(value="连接后可发送任意文本（最多 512 字节）。")
@@ -211,9 +195,9 @@ class DeckApp:
             self._label(card, title, fg=MUTED).pack(anchor="w")
             self._label(card, textvariable=var, fg=color,
                         font=("Consolas", 16, "bold")).pack(anchor="w")
-        right = self._panel(content, "深度视频  /  48 × 48")
+        right = self._panel(content, "数据帧  /  不透明字节")
         right.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
-        self.video = tk.Label(right, text="等待深度图像", bg="#0f1929", fg=MUTED,
+        self.video = tk.Label(right, text="等待数据帧\n当前格式均无像素布局", bg="#0f1929", fg=MUTED,
                               font=("Segoe UI", 15), width=36, height=7)
         self.video.pack(fill="both", expand=True)
         self.video_image = None
@@ -247,7 +231,7 @@ class DeckApp:
         mode_row = tk.Frame(firmware, bg=PANEL)
         mode_row.pack(fill="x")
         selector = ttk.Combobox(mode_row, textvariable=self.format_var,
-                                values=list(FORMATS), state="readonly", width=17)
+                                values=list(FORMATS), state="readonly", width=24)
         selector.pack(side="left")
         selector.bind("<<ComboboxSelected>>", lambda _event: self._update_firmware_hint())
         self._entry(mode_row, self.port_var, 10).pack(side="left", padx=8, ipady=5)
@@ -273,11 +257,11 @@ class DeckApp:
         footer.pack(fill="x")
         self._label(footer, textvariable=self.stats_var, bg=BG, fg=MUTED,
                     font=("Consolas", 10)).pack(side="left")
-        self._label(footer, "DPT1 / PDK1", bg=BG, fg=MUTED).pack(side="right")
+        self._label(footer, "DPT / PDK1", bg=BG, fg=MUTED).pack(side="right")
 
     def _update_firmware_hint(self):
-        number, folder = FORMATS[self.format_var.get()]
-        self.firmware_var.set(f"已选择格式 {number} · bench_artifacts/{folder}/\n仅更新界面选择，尚未烧录设备。")
+        number = FORMATS[self.format_var.get()]
+        self.firmware_var.set(f"已选择 DPT 格式 {number}\n需使用匹配的 DPT 固件；烧录功能尚未实现。")
 
     def browse_folder(self):
         selected = filedialog.askdirectory(parent=self.root, title="选择记录保存位置",
@@ -427,18 +411,12 @@ class DeckApp:
         if newest:
             stamp, source, frame = newest
             self.latest_frame = frame
-            name = {1: "u16+状态", 2: "float32 深度", 3: "原始字节"}.get(frame["format"], "未知")
+            name = f"不透明字节 · 格式 {frame['format']}"
             self.frame_var.set(
                 f"{source}  ·  {name}  ·  帧 {frame['seq']}  ·  {len(frame['raw'])} B\n"
                 f"C6 驻留 {frame['c6_queue_ms']} ms  ·  电脑重组 {frame['reassembly_ms']:.1f} ms")
-            if frame["pixels"] is None:
-                self.video.configure(image="", text="原始字节帧\n无已定义像素布局", fg=MUTED)
-                self.video_image = None
-            else:
-                ppm = depth_ppm(frame)
-                scale = max(1, min((self.video.winfo_width() - 16) // 48, (self.video.winfo_height() - 24) // 48))
-                self.video_image = tk.PhotoImage(data=ppm, format="PPM").zoom(scale, scale)
-                self.video.configure(image=self.video_image, text="")
+            self.video.configure(image="", text="不透明字节载荷\n无像素布局，不生成视频预览", fg=MUTED)
+            self.video_image = None
             self.status_var.set(f"正在接收 {source}")
         if self.receiver and self.last_packet_at and time.monotonic()-self.last_packet_at > 3:
             self.status_var.set("已连接 · 等待数据")

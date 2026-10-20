@@ -1,42 +1,36 @@
-"""PDK1 fragment reassembly and DPT1 depth decoding for the desktop GUI."""
-import math
+"""PDK1 fragment reassembly and DPT depth decoding for the desktop GUI."""
 import struct
 import zlib
 from collections import Counter, OrderedDict
 
 HEADER = struct.Struct("<4sBBHIIIIHHHHII")
-FRAME_HEADER = struct.Struct("<4sBBHIIHHIHHI")
-FRAME_SIZES = {1: 6948, 2: 9252, 3: 14800}
-PAYLOAD_SIZES = {1: 6912, 2: 9216, 3: 14764}
+# DPT: uint8 type/format, then LE uint32 seq/milliseconds/payload bytes.
+MAGIC_DPT = 0x01
+FRAME_HEADER = struct.Struct("<BBIII")
+# All profiles are opaque bytes. The format selects a fixed payload size.
+FRAME_PROFILES = {1: (0, 0, 6912),
+                  2: (0, 0, 9216),
+                  3: (0, 0, 14900)}
+PAYLOAD_SIZES = {fmt: profile[2] for fmt, profile in FRAME_PROFILES.items()}
+FRAME_SIZES = {fmt: FRAME_HEADER.size + size + 4 for fmt, size in PAYLOAD_SIZES.items()}
 CHUNK = 1200
 
 
 def decode_frame(data):
     if len(data) < FRAME_HEADER.size + 4:
-        raise ValueError("Short DPT1 frame")
-    magic, version, fmt, hlen, seq, tick, width, height, size, unit, flags, total = FRAME_HEADER.unpack_from(data)
-    if (magic, version, hlen, width, height, flags) != (b"DPT1", 1, 32, 48, 48, 1):
-        raise ValueError("Unsupported DPT1 frame")
-    if fmt not in FRAME_SIZES or len(data) != FRAME_SIZES[fmt] or total != len(data):
-        raise ValueError("Unexpected DPT1 format or frame size")
-    if size != PAYLOAD_SIZES[fmt] or unit != (1 if fmt == 1 else 0):
-        raise ValueError("Invalid DPT1 payload metadata")
+        raise ValueError("Short DPT frame")
+    magic, fmt, seq, tick, size = FRAME_HEADER.unpack_from(data)
+    if magic != MAGIC_DPT:
+        raise ValueError("Unsupported SPI data type (magic 0x01 required)")
+    if fmt not in FRAME_PROFILES:
+        raise ValueError("Unsupported DPT format profile")
+    width, height, expected_size = FRAME_PROFILES[fmt]
+    if size != expected_size or len(data) != FRAME_SIZES[fmt]:
+        raise ValueError("Unexpected DPT payload or frame size")
     if zlib.crc32(data[:-4]) != struct.unpack_from("<I", data, len(data)-4)[0]:
         raise ValueError("Bad frame CRC32")
-    payload = data[hlen:-4]
-    if fmt == 1:
-        pixels = list(struct.iter_unpack("<HB", payload))
-        if any(s not in (0, 1) or (s == 0 and d != 0) for d, s in pixels):
-            raise ValueError("Invalid pixel encoding")
-    elif fmt == 2:
-        metres = [v[0] for v in struct.iter_unpack("<f", payload)]
-        if any(not math.isfinite(v) or v < 0 for v in metres):
-            raise ValueError("Invalid float depth")
-        pixels = [(round(v * 1000), int(v > 0)) for v in metres]
-    else:
-        pixels = None  # Opaque synthetic raw bytes have no known pixel layout.
     return dict(seq=seq, camera_ms=tick, width=width, height=height,
-                format=fmt, payload_size=size, pixels=pixels)
+                format=fmt, payload_size=size, pixels=None)
 
 
 class Reassembler:

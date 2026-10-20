@@ -1,156 +1,137 @@
 # Power Deck
 
-Power Deck 是一套用于同步采集功耗和深度帧、并通过 WiFi 发送到电脑的实验工程。当前工程包含 ESP32-C6 接收与传输固件、STM32F103C8T6 摄像头模拟固件，以及 Windows 上位机。STM32 目前发送的是合成测试数据，并非真实摄像头原生输出格式。
+采集 INA226 功耗与摄像头帧，经 ESP32-C6 WiFi/UDP 发往电脑。当前链路为 **STM32F103 SPI 主机 → ESP32-C6 SPI 从机 → PC**；F103 仍产生合成载荷，真实 STM32N6 采集尚未接入。
+
+图像协议已统一为 **DPT：14 B 帧头 + 载荷 + 4 B CRC32**，SPI 在 CRC 后另补 2 B 零字节。F103、C6 和上位机必须一起更新。字段/格式配置的统一定义见 [FRAME_PROTOCOL.md](FRAME_PROTOCOL.md)，N6 开发交接见 [N6_CAMERA_INTEGRATION.md](N6_CAMERA_INTEGRATION.md)。
 
 ## 系统结构
 
-```text
-INA226 ──I²C──> ESP32-C6 power_sample_task ──> 功耗样本队列 ──> power_udp ──┐
-                                                                        ├─WiFi/UDP─> 电脑 deck_gui
-STM32F103 模拟帧 ──SPI──> ESP32-C6 depth_rx_task ──> 深度帧缓存/队列 ──> depth_udp ─┘
-```
+~~~text
+INA226 ─I2C→ power_sample_task → 功耗队列 → power_udp ─┐
+                                                     ├→ WiFi/UDP → deck_gui
+F103 主机 ─SPI→ depth_rx_task → 完整帧队列 → depth_udp ─┘
+                    ↑                        │
+                    └──── 空闲帧索引队列 ────┘
+PC ─UDP 5006→ net_rx_task：发现、连接租约、文本消息/确认
+~~~
 
-`power_sample_task` 每 100 ms 读取 INA226；`depth_rx_task` 按设定周期向 STM32 请求一帧，通过 SPI 接收并校验 DPT1 帧；`net_tx_task` 管理队列和发送次序。独立的 `net_rx_task`（`main/Src/net_rx.c`）监听 UDP 5006，处理电脑发现、文本消息、接收确认和连接租约；`net_tx_task` 通过线程安全的状态快照取得电脑目的地址。功耗 JSON 与深度帧由独立的 `power_udp`、`depth_udp` 模块发送。电脑向 C6 的 UDP 5006 发送 `PDHELLO1`，C6 使用发现到的电脑 IP 和端口单播回传。电脑接收端监听 UDP 5005。 功耗 JSON 还携带 `rssi_dbm` 和 `rssi_valid`：RSSI 是 C6 读取到的热点信号强度（dBm），无连接时 `rssi_valid` 为 `false`；上位机显示并记录该值。
+- `power_sample_task` 每 100 ms 采样，功耗 JSON 包含电压、电流、功率及 `rssi_dbm` / `rssi_valid`。
+- `depth_rx_task` 提前提交从机 DMA 缓冲，取回事务后检查实际位数、DPT 和 CRC。
+- `net_tx_task` 在功耗样本和深度分片间调度；通过线程安全快照取得 PC 地址。
+- `depth_udp` 发送 PDK1 分片；`net_rx_task` 独立监听 UDP 5006。
+- PC 监听 UDP 5005，定期发送 `PDHELLO1`；C6 按其源 IP/端口单播，租约 5 秒。
 
 ## 仓库内容
 
-| 路径 | 用途 |
+| 路径 | 内容 |
 |---|---|
-| `main/` | ESP-IDF 固件，包括 WiFi、INA226、SPI 接收、UDP 模块和 FreeRTOS 任务 |
-| `camera_spi_mock/` | STM32F103C8T6 摄像头模拟固件、CMake 工程和 DPT1 协议说明 |
-| `tool/` | GUI、GUI 网络后端、深度帧解析器和使用说明 |
-| `bench_artifacts/` | 不同测试载荷模式的预编译 C6 与 STM32 固件 |
-| `sdkconfig`、根目录 `CMakeLists.txt` | ESP-IDF 工程配置 |
+| main/ | C6 SPI 从机、WiFi、INA226、FreeRTOS 任务、UDP 模块 |
+| camera_spi_mock/ | F103 SPI 主机模拟器、CubeMX/CMake、抓帧工具 |
+| tool/ | GUI、协议解析、UDP 收发与录制 |
+| [FRAME_PROTOCOL.md](FRAME_PROTOCOL.md) | DPT 固定头、格式配置、CRC、兼容规则 |
+| [camera_spi_mock/PROTOCOL.md](camera_spi_mock/PROTOCOL.md) | F103 接线、时序、DMA、统计与构建 |
+| [tool/GUI_README.md](tool/GUI_README.md) | GUI 安装/运行、消息、保存、测试 |
+| [N6_CAMERA_INTEGRATION.md](N6_CAMERA_INTEGRATION.md) | 真实 N6 主机采集接入流程与注意事项 |
+| [N6_SPI_ALIGNMENT.md](N6_SPI_ALIGNMENT.md) | 师兄 Apollo SPI 工程与本项目的差异、修改分工和联调清单 |
+| [BENCHMARK_MODES.md](BENCHMARK_MODES.md) | 当前载荷规模与历史镜像说明 |
+| bench_artifacts/ | **旧帧格式 / C6 主机 / F103 从机镜像，不能与当前工程混用** |
 
 ## 硬件与接线
 
-### STM32F103C8T6 到 Power Deck ESP32-C6
+| Power Deck / C6 | Apollo N6 | F103C8T6 模拟器 | 当前用途 |
+|---|---|---|---|
+| SCK / GPIO6 | PF15 / SPI5_SCK | PA5 / SPI1_SCK | STM32 输出时钟，C6 输入 |
+| MOSI / GPIO7 | PF11 / SPI5_MOSI | PA7 / SPI1_MOSI | STM32 发送数据，C6 接收 |
+| CS / GPIO4 | PA3 / SPI5_CS | PA6 / CAM_CS | 低有效片选 |
+| GND | GND | GND | 共地 |
 
-| Power Deck / C6 | STM32F103C8T6 | 作用 |
-|---|---|---|
-| GPIO6 | PA5 / SPI1_SCK | SPI 时钟，C6 主机输出 |
-| GPIO2 | PA6 / SPI1_MISO | STM32 数据输出到 C6 |
-| GPIO7 | PA7 / SPI1_MOSI | C6 请求电平及 SPI dummy 数据 |
-| GND | GND | 共地 |
+C6 引脚已与师兄 Apollo 工程统一为 SCK=6、MOSI=7、CS=4。原 GPIO2/MISO 不再连接；旧 F103 接线需将 PA6 的 CS 线从 C6 GPIO2 移到 GPIO4。F103 为 Half-Duplex Master、单线 TX DMA；C6 为 RX-only 从机，SPI Mode 0、8 bit、MSB first、3.3 V 电平。
 
-信号电平为 3.3 V。当前方案没有 CS 或 READY 引脚，SPI 总线应专用，不能同时接入另一个主机。SPI 使用 Mode 0、8 位、MSB first。启动和无 CS 请求恢复时序见 [`camera_spi_mock/PROTOCOL.md`](camera_spi_mock/PROTOCOL.md)。简要来说，C6 在 SCK 保持低电平时先拉低 MOSI，再拉高请求 STM32 准备帧；随后 MOSI 拉低并读取固定长度数据。数据阶段 MOSI 发送零，不发送命令字节。
+当前 APB2 72 MHz / 8 产生 SPI **9 MHz**，F103 用 33/33/34 ms 节拍实现平均目标 **30 fps**。一个 CS 事务传一帧，结束最后一位后拉高 CS；没有旧 MOSI 请求和 dummy 数据。C6 预排队最多 3 个缓冲，但**没有 READY**，重启或缓冲耗尽仍可能漏收，实际帧率需上板验证。
 
-### INA226 到 Power Deck
+两端先更新再联机；禁止旧 C6 主机固件与新 F103 主机固件同时驱动 SCK/MOSI。
 
-固件使用 I²C 控制器 0、GPIO19 SDA、GPIO18 SCL、100 kHz，总线地址为 `0x40`。测量配置按 10 mΩ 分流电阻和 1 mA 电流 LSB 设置。找不到 INA226 时，功耗采集关闭，深度接收仍会启动。
+INA226：C6 GPIO19 SDA、GPIO18 SCL，I2C 100 kHz，地址 0x40；当前按 10 mΩ 分流电阻、1 mA 电流 LSB 配置。找不到 INA226 时功耗采样关闭，深度链路仍启动。RSSI 表示 C6 收到热点的信号，不是 PC 测得的上行信号强度。
 
-## 当前帧格式
+## 当前格式和配置
 
-配置必须在两端匹配：
+默认格式 3。三个格式都是不透明字节，仅载荷长度不同，不定义宽高/单位。帧头按顺序为 1 B magic、1 B format、4 B seq、4 B camera_ms、4 B payload_bytes：
 
-- C6：`main/Inc/deck_config.h` 中的 `DEPTH_TEST_FORMAT`
-- STM32：`camera_spi_mock/Core/Inc/camera_mock.h` 中的 `CAM_TEST_FORMAT`
+| format | 不透明载荷（B） | 有效帧 F（B） | SPI 线长 W（B） | UDP 分片 | 预览 |
+|---:|---:|---:|---:|---:|---|
+| 0x01 | 6912 | 6930 | 6932 | 6 | 仅 .bin |
+| 0x02 | 9216 | 9234 | 9236 | 8 | 仅 .bin |
+| 0x03 | 14900 | 14918 | 14920 | 13 | 仅 .bin |
 
-当前代码两端均设置为格式 3，分辨率字段为 48×48，总帧长 14,800 字节。即使选择格式 3，载荷前仍有 DPT1 帧头，末尾仍有 CRC32；“raw”只表示载荷不按像素解释，不能省略帧结构。
+| 项目 | 配置位置 |
+|---|---|
+| F103 格式、帧率、启动等待 | camera_spi_mock/Core/Inc/camera_mock.h：CAM_TEST_FORMAT、CAM_TARGET_FPS |
+| F103 SPI 分频 | CubeMX 或 Core/Src/main.c 的 MX_SPI1_Init() |
+| C6 WiFi、格式、缓冲、引脚 | main/Inc/deck_config.h：SSID/密码、DEPTH_TEST_FORMAT、DEPTH_FRAME_COUNT |
+| C6 载荷尺寸/头长 | main/Inc/depth_spi.h |
+| PC 格式配置 | tool/src/depth_protocol.py：FRAME_PROFILES |
 
-| 格式号 | 载荷 | 载荷大小 | DPT1 总长 | 上位机预览 |
-|---:|---|---:|---:|---|
-| 1 | 每像素 `uint16 深度(mm) + uint8 状态` | 6,912 B | 6,948 B | 支持 |
-| 2 | 48×48 个 `float32 深度(m)`，0 表示无效 | 9,216 B | 9,252 B | 支持 |
-| 3 | 不透明合成字节载荷 | 14,764 B | 14,800 B | 不支持像素预览，可保存原始帧 |
+切换 1/2/3 时修改两端相同格式号，重新构建/烧录；PC 识别表内格式。新增分辨率、单位或布局要分配新格式号并修改三端配置，不能仅改变 payload_bytes。N6 真实数据可按等长字节打包，但三个格式均不做图像解释；需要预览时新增明确像素格式。magic=0x01 表示 DPT，format 为单字节编号；其他类型/配置待定。
 
-DPT1 多字节字段为小端序；帧头包含版本、格式号、序号、时间戳、宽高、载荷长度、单位、标志位和总长度，帧尾是 CRC-32/ISO-HDLC。C6 校验帧头、长度和 CRC 后才会发送。
+有效帧 F=14+payload+4；SPI 线长 W=align_up(F,4)，当前在 CRC 后补 2 B 零字节。C6 RX 容量 W+4 的最后 4 B 是不发送的保护空间。UDP/.bin 只包含 F 字节。C6 不再分配整帧零数据 TX 缓冲。PDK1 外层仍是 40 B 头 + 最多 1200 B DPT 切片。
 
-C6 再将完整 DPT1 帧切成最多 1,200 字节的数据片，每片添加 40 字节 PDK1 头后通过 UDP 发送。电脑按会话号、帧序号和片偏移重组，再校验 DPT1。功耗以 JSON datagram 单独发送。
+## 构建与烧录
 
-### 更改帧格式
+### ESP32-C6
 
-修改格式时，先将 C6 和 STM32 的格式号改成相同值，然后分别重新构建和烧录两端固件。电脑解析器目前仅接受表中三种固定长度和 48×48 布局。增加真实摄像头的分辨率、像素布局或帧长时，必须同步更新 C6 校验、电脑 `tool/src/depth_protocol.py` 解析逻辑及预览方式。
+使用已配置 ESP-IDF 5.5.5 的 VS Code 扩展：
 
-`bench_artifacts/` 用于快速复现三种测试载荷的吞吐测试，不是运行上位机所需文件，也不是摄像头驱动。不要混用不同格式的 C6 和 STM32 镜像。测试镜像地址和基准测试方法见下文“吞吐基准测试模式”；优先使用正常构建流程生成当前固件。
+1. 打开根目录，目标选择 ESP32-C6。
+2. 编辑 `main/Inc/deck_config.h` 中热点 SSID/密码，电脑热点使用 2.4 GHz。
+3. 需要调整 SDK 参数时使用 SDK Configuration Editor。
+4. Build Project → Flash Device → Monitor Device，选择实际串口。
 
-## 吞吐基准测试模式
+输出 `build/Power_Deck.bin`；使用正常完整烧录流程，app 偏移为 0x10000。当前代码是 SPI 从机；旧 bench_artifacts 的主机固件不能使用。
 
-STM32F103C8T6 发送的是合成 DPT1 帧，不是真实摄像头的原始格式。三个格式的载荷和传输规模如下；每个 UDP 分片最多承载 1,200 字节帧数据，另有 40 字节 PDK1 头：
+### STM32F103C8T6
 
-| 格式 | 载荷内容 | DPT1 总长 | UDP 分片数 |
-|---:|---|---:|---:|
-| 1 | `uint16 深度(mm) + uint8 状态` | 6,948 B | 6 |
-| 2 | 48×48 `float32` 米，0 表示无效 | 9,252 B | 8 |
-| 3 | 不透明合成 raw 载荷，不作像素解释 | 14,800 B | 13 |
+需要 CMake 3.22+、Ninja、GNU Arm 工具链。提供 Debug/Release presets：
 
-基准测试时，C6 的 `DEPTH_TEST_FORMAT` 与 STM32 的 `CAM_TEST_FORMAT` 必须设置为相同值。源码默认值为格式 2。可供快速复现的配套预编译固件位于 `bench_artifacts/u16_status`、`bench_artifacts/float` 和 `bench_artifacts/raw`；不要混用不同模式的镜像。烧录时 C6 app bin 地址为 `0x10000`，STM32 bin 地址为 `0x08000000`。正常开发优先通过上文构建流程生成当前固件。
-
-电脑接收器会自动识别三种格式：三种模式均保存 `.bin`，格式 1 和 2 另外生成 `.pgm` 深度图。STM32 使用整帧 TX DMA，以及 128 字节循环 RX DMA sink，以便在 20 KiB SRAM 中接收 raw 大帧。
-
-每种模式运行 60 秒并建立连接后，对比 C6 串口中的 depth `ok/err/no_buf/drop/tx` 计数，以及电脑端的 fps、invalid、incomplete。该测试衡量传输容量，不代表真实传感器采集延迟，也不表示 raw 数据具有真实图像语义。
-
-## 配置与构建
-
-### ESP32-C6（ESP-IDF）
-
-
-
-
-
-
-
-需要 ESP-IDF 5.5.5 及其 ESP32-C6 工具链。使用 VS Code 中的 ESP-IDF 扩展操作，不需要在命令行执行 C6 配置或构建命令：
-
-1. 在 VS Code 打开仓库根目录，确保 ESP-IDF 扩展已安装并完成工具链配置。
-2. 如需切换目标芯片，点击状态栏中的目标芯片选择器（或打开命令面板运行 **ESP-IDF: Set Espressif Device Target**），选择 **ESP32-C6**。
-3. 烧录前编辑 `main/Inc/deck_config.h`，设置 2.4 GHz WiFi 的 `POWER_WIFI_SSID` 和 `POWER_WIFI_PASSWORD`。同时，开启电脑端的移动热点，并编写对应的名称、密码和频段。`deck_config.h`还包含 SPI 频率、请求周期和格式选择。
-4. 通过 ESP-IDF Explorer 的 **SDK Configuration Editor**（`menuconfig`）检查工程配置；需要修改 Kconfig 选项时在该编辑器中保存配置。
-5. 在状态栏或 ESP-IDF Explorer 点击 **Build Project** 构建；点击 **Flash Device** 烧录，按提示选择对应串口；点击 **Monitor Device** 查看串口日志。也可使用状态栏对应的构建、烧录和监视按钮。
-
-
-**当前配置为格式 3、SPI 10 MHz、请求周期 33 ms、MOSI 请求高电平 8 ms；这些是当前测试配置，实际硬件运行仍需观察错误与帧率。**
-
-串口日志会周期性输出功耗与深度的 `ok/err/drop/tx`、SPI/CRC 错误、丢帧原因、队列峰值、堆空间和任务栈余量。WiFi 尚未连接或电脑接收端未发现时的丢帧也会计数。
-
-### STM32F103C8T6（CMake / GNU Arm）
-
-需要 CMake 3.22+、Ninja 和 GNU Arm Embedded 工具链。工程提供 Debug 与 Release preset：
-
-```powershell
+~~~powershell
 cd camera_spi_mock
 cmake --preset Debug
 cmake --build --preset Debug
-```
+~~~
 
-生成的 ELF/BIN 位于 `camera_spi_mock/build/Debug/`。可通过 STM32CubeIDE 导入或使用 ST-Link 烧录 BIN；Flash 起始地址为 `0x08000000`。修改帧格式时，检查 `Core/Inc/camera_mock.h` 中的 `CAM_TEST_FORMAT`，并与 C6 配置保持一致。调试器可观察 `g_camera_stats` 中的请求、完成、超时、错误、帧构建耗时和最大构建耗时。
+生成 `build/Debug/camera_spi_mock.elf` 和同名 .bin；Release 同理。可用 STM32CubeIDE/ST-Link，Flash 起始 0x08000000。CubeMX .ioc 已同步为主机、PA6 CS、仅 TX DMA。
 
-### Windows 上位机
+调试器观察 `g_camera_stats` 的 generated/started/completed、错误、超时、打包/发送耗时和 spi_hz，详细含义见 [模拟器说明](camera_spi_mock/PROTOCOL.md)。
 
-需要 Python 3.10+、[uv](https://docs.astral.sh/uv/) 和包含 Tkinter 的 Python。进入 `tool/` 目录运行：
+## 电脑上位机
 
-```powershell
+Python 3.10+、包含 Tkinter 的 Python，以及 uv；运行时仅依赖标准库。在 tool 目录：
+
+~~~powershell
 uv run deck-gui
-```
-
-C6 IP 留空时尝试局域网发现；也可以指定地址：
-
-```powershell
+# 指定当前 C6 IP 时
 uv run deck-gui --board 192.168.137.66
-```
+~~~
 
-GUI 监听电脑 UDP 5005。Windows 防火墙需允许本程序接收 UDP 5005；如果广播发现被网络隔离，手动填写 C6 IP。
+C6 IP 留空自动发现；广播受限时填写 IP。Windows 防火墙允许 UDP 5005。GUI 显示最近 60 秒功耗曲线、RSSI 和帧统计；三个格式均不提供图像预览。按“开始记录”选择父目录/文件夹名，保存 power.csv、depth.csv、完整 DPT .bin，三种格式均只保存 .bin，不生成 .pgm。
 
-GUI 显示最近 60 秒的电压、电流、功率曲线、深度预览、帧率和接收统计。开始记录后，在指定目录下创建新文件夹，保存 `power.csv`、`depth.csv`、每帧原始 `.bin`，以及格式 1/2 的 `.pgm` 深度图。格式 3 载荷布局未知，所以只保存 `.bin`，不生成深度预览。
+GUI WiFi 消息支持最多 512 B UTF-8 文本：PDMSG1 发往 UDP 5006，C6 打印后回 PDACK1；2 秒未确认提示超时。当前只传文本，不执行开始采集/格式切换等设备指令；“帧类型/重新烧录”仍为预留界面。接收任务栈 3072 B、优先级 4，由 stream_tasks_start 创建。
 
-底部“序号缺口 / 估算丢帧”根据成功重组的 DPT1 帧序号计算：
+PC 工具已更新为 0.5.0，仅接收 DPT。已录制的旧帧格式 需要旧工具查看，本次不做自动转换。
 
-```text
-估算丢帧率 = 序号缺口 / (已收到帧数 + 序号缺口) × 100%
-```
+## 统计与验证
 
-统计按设备 IP 和 C6 session 分开；最近的乱序帧会在有限窗口内修正。该估算只覆盖本次 session 首个与最新有效帧之间的序号范围，不计开始前或结束后的未知帧，也不能区分 C6 主动丢帧和 WiFi/UDP 丢帧。GUI 上的 `incomplete` 表示电脑端分片重组超时，不等同于总丢帧率。
+- C6：`depth_err_detail spi/length/header/crc`，以及 drop_reason、send_err、last_rx_bits、heap/min/dma_block。
+- `spi_wait_max_us` 包含等待主机空闲/停发，`check_max_us` 是帧校验耗时；都不能直接当端到端延迟。
+- `pool` 包含预排队的 SPI 缓冲，3 可能正常；`no_buf` 是无已排队事务且无空闲帧时的耗尽事件，不是漏帧总数。
+- drop_reason 区分 ready_full/no_wifi/no_receiver/stale/udp。启动前 no_wifi/no_receiver 的累计增长需与连接后的增量区分。
+- GUI `invalid` 为无效数据，`incomplete` 为分片重组超时。“序号缺口/估算丢帧”基于有效 DPT seq，不能单独区分源端/C6/WiFi 丢帧。
+- GUI fps 可能包含重复采集帧，真实采集率还要检查唯一 seq。独立重启源端会使序号归零，初次联调建议成组重启。
 
-接收模块独立为 `main/Src/net_rx.c` / `main/Inc/net_rx.h`，拥有自己的 UDP socket 和 `net_rx_task`，由 `stream_tasks_start()` 与其他任务一起使用 `xTaskCreate()` 统一创建；任务优先级为 4，栈分配为 3072 字节。`depth_udp.c` 只负责深度帧封装与发送，`net_tx_task` 不再调用接收轮询。串口每秒输出 `net_rx messages/ack_err=... stack_free=...`，用于观察累计消息数、确认发送失败数和接收任务栈余量。
+在根目录：
 
-GUI 的“WiFi 消息”支持向已连接的 C6 发送任意 UTF-8 文本（最多 512 字节）。C6 收到后在串口输出 `PC message ... text=...` 并返回接收确认，上位机显示“板端已接收”；2 秒未确认时显示超时。消息和发现复用 UDP 5006，数据及确认返回电脑原有 UDP 5005。此功能只传递文本，不解析或执行设备指令。“帧类型/重新烧录”仍为界面预留项。启用消息接收需重新构建并烧录当前 C6 固件，旧的基准镜像不支持该功能。
+~~~powershell
+python -m unittest discover -s tool/tests -v
+python -m unittest discover -s camera_spi_mock/tools -v
+~~~
 
-## 调试与验证
-
-- STM32 DPT1 格式说明、SPI 无 CS 请求时序和恢复流程：[`camera_spi_mock/PROTOCOL.md`](camera_spi_mock/PROTOCOL.md)
-- 三种载荷模式和预编译固件：见本 README 的“吞吐基准测试模式”章节
-- 上位机操作说明：[`tool/GUI_README.md`](tool/GUI_README.md)
-- C6 串口：查看 `depth err`、`depth drop`、`drop_reason`、`depth tx` 和堆/栈统计。
-- 电脑 GUI：查看序号缺口估算、`invalid`、`incomplete` 和界面跳过数。`evicted`、重组队列峰值等由接收后端统计，但当前 GUI 状态栏不展示。
-
-这套工程目前验证的是 STM32 合成帧到 C6 再到电脑的传输链路。真实摄像头的原生输出格式、采集接口和时序尚未接入；切换真实摄像头前，先确认传感器的分辨率、位宽、深度单位、无效值编码和帧同步方式。
+覆盖 DPT、旧协议拒收、UDP 重组、实际 PC 接收/录制、RSSI、任意载荷字节和 CLI 拒绝 PGM。构建/软件测试不能证明硬件帧率；真实 N6 接入时还需确认摄像头布局、单位、DMA/cache、CS 和启动恢复，参见交接文档。

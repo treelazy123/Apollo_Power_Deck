@@ -1,0 +1,21 @@
+{
+  "folders": [
+    {
+      "name": "power_deck",
+      "path": "fireware/power_deck"
+    },
+    {
+      "name": "n6",
+      "path": "fireware/n6"
+    },
+    {
+      "name": "repository",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "cmake.configureOnOpen": false,
+    "cmake.configureOnEdit": false,
+    "cmake.automaticReconfigure": false
+  }
+}

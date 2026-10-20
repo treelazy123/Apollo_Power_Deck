@@ -1,56 +1,94 @@
 # Power Deck 上位机 GUI
 
-适用于 Windows 的功耗、深度图监控和 WiFi 消息界面。需要 Python 3.10+ 和 [uv](https://docs.astral.sh/uv/)。运行时仅依赖 Python 标准库；图形界面使用 Tkinter。
+当前版本 **0.5.0**，支持 DPT 数据帧、PDK1 UDP 分片、功耗 JSON/RSSI 和文本消息。需要 Python 3.10+、Tkinter 和 uv；无第三方运行时依赖。帧定义见 [DPT 协议](../FRAME_PROTOCOL.md)。
 
-## 从源码目录运行
+## 启动
 
-在本目录中执行：
+在 tool 目录：
 
-```powershell
+~~~powershell
 uv run deck-gui
-```
+uv run deck-gui --board 192.168.137.66
+# 也可用 Python
+python -m src.deck_gui
+~~~
 
-`deck-gui` 会打开监控界面，提供实时功耗曲线、深度预览和数据记录功能。 功耗卡片同时显示 ESP32-C6 读取的 WiFi RSSI（dBm）；记录时写入 `power.csv` 的 `rssi_dbm`、`rssi_valid` 列。旧固件未发送 RSSI 字段时显示 N/A。C6 IP 留空即可自动发现同一局域网中的 Power Deck；发现后界面会显示设备 IP。也可以手动填写 IP。GUI 监听 UDP 5005，并向 C6 UDP 5006 发送 `PDHELLO1` 发现报文。
+C6 IP 留空自动发现，也可手动输入。GUI 监听 UDP 5005、向 C6 UDP 5006 发送 PDHELLO1。Windows 防火墙需放行；广播不可用时指定 IP。避免同时运行多个争用 UDP 5005 的接收程序。
 
-## 安装和分发
+## 协议与显示
 
-在本目录中构建 wheel，然后将生成的文件复制到装有 Python 3.10+ 和 uv 的 Windows 电脑：
+DPT 有效帧为 14 B 头 + 载荷 + 4 B CRC；头是 `<BBIII`，依次为 1 B magic=0x01、1 B format、4 B seq、4 B camera_ms、4 B payload_bytes。FRAME_PROFILES 只定义三个载荷长度；width/height=0、pixels=None。
 
-```powershell
+| format | 布局 | 有效帧 F（B） | 显示/保存 |
+|---:|---|---:|---|
+| 1 | 6912 B 不透明字节 | 6930 | 仅 .bin，无预览 |
+| 2 | 9216 B 不透明字节 | 9234 | 仅 .bin，无预览 |
+| 3 | 14900 B 不透明测试载荷，无图像宽高 | 14918 | 仅 .bin |
+
+PDK1 外层保持 40 B 头、最多 1200 B 片段，传输并重组有效帧 F；SPI CRC 后的 2 B 填充不进入 UDP 或 .bin。旧录制文件和旧 bench_artifacts 镜像不自动兼容，升级须同步源端、C6 和 PC。
+
+功耗曲线显示最近 60 秒电压/电流/功率；WiFi RSSI 卡片显示 C6 收到热点的信号强度（dBm）。功耗包没提供有效 RSSI 时显示“— dBm”。RSSI 不等于 PC 测得的 C6 上行强度。
+
+## 记录与复核
+
+“开始记录”可自选父目录和文件夹名，在新目录保存：
+
+- power.csv：电脑时间、板端地址、C6 session、功耗 seq/timestamp_ms、电压/电流/功率与 rssi_dbm/rssi_valid。
+- depth.csv：seq、camera_ms、format、payload_size、C6 时间、重组耗时和文件名。
+- frames/*.bin：完整 DPT（头+载荷+CRC），无 PDK1 头；不是仅传感器 payload。
+- 三种格式均不生成 .pgm。depth.csv 的 pgm_file 列为兼容既有 CSV 表头而保留，始终为空。
+
+当前帧不声明真实/合成来源；如需记录真实/合成来源、传感器型号、标定等，随采集目录提供说明。不要根据帧头猜来源。
+
+记录目录不会覆盖已有目录。后台写盘有有界队列，磁盘跟不上时会丢弃待记录项，应检查录制状态。
+
+## 统计含义
+
+| 指标 | 含义 |
+|---|---|
+| fps / 完整帧 | 成功重组的帧率/累计数，可能包含重复源帧 |
+| invalid | 消息/分片/帧解析或校验失败 |
+| incomplete | 某帧分片在默认 300 ms 内未收齐 |
+| 序号缺口 / 估算丢帧 | 按有效 DPT seq 估算端到端缺失，不能定位到具体环节 |
+| 乱序 | 超出近期修正范围的异常回退序号累计，不是 UDP 分片乱序数 |
+| 界面跳过 | 网络事件入 GUI 队列时被跳过，不等于网络丢包 |
+
+估算丢帧率 = 序号缺口 ÷（已收到帧数 + 序号缺口）；按源 IP 和 C6 session 重新统计，只覆盖首个与最新有效序号之间，近期迟到帧可修正。N6/F103 独立重启而 C6 session 未变时，估算可能受干扰。
+
+seq/camera_ms 均为 uint32：30 fps 下序号约 4.54 年回绕，毫秒计时约 49.71 天回绕；不会因此自动停止记录。camera_ms、C6 时间和 PC 时间未同步。“C6 驻留”从 C6 校验后开始，“电脑重组”从首片到完整帧，都不是完整摄像头到 PC 的延迟。
+
+## WiFi 消息
+
+1. 源端、C6 及工具使用当前 DPT 版本，并先连接 GUI。
+2. “WiFi 消息”输入文本，点发送或 Enter，上限 512 B UTF-8。
+3. C6 串口打印 `net_rx: PC message id=... bytes=... text=...`。
+4. GUI 收到确认后显示“板端已接收”；2 秒未确认提示超时，不自动重发。
+
+“已发送”仅表示 PC 发出数据报，“板端已接收”表示 C6 文本处理确认，不表示 N6 执行采集指令。数据包为 PDMSG1（6 B）+ uint32 小端 ID + 文本，确认 PDACK1 + 同 ID；与发现复用 UDP 5006，返回 PC 接收端口。C6 仅接受当前租约对应的 PC IP/端口。
+
+当前未实现 N6 采集控制、运行时帧格式切换或重新烧录；相关按钮为预留。
+
+## 安装与分发
+
+~~~powershell
 uv build
-uv tool install .\dist\power_deck_tools-0.1.0-py3-none-any.whl
+uv tool install --force .\dist\power_deck_tools-0.5.0-py3-none-any.whl
 deck-gui
-```
+~~~
 
-也可以将源码目录复制到目标电脑，然后在该目录运行 `uv tool install .`。本项目没有第三方运行时依赖。使用 `deck-gui` 时，所用 Python 发行版必须包含 Tkinter。
+也可复制源码后 `uv tool install --force .`。不要继续使用缓存的旧版 旧帧格式 工具。进入 tool 目录运行 `uv run deck-gui --help` 查看参数。
 
-Windows 防火墙需要允许本程序接收 UDP 5005 端口的数据。自动发现使用 UDP 广播，因此电脑和开发板需要位于支持广播互通的同一局域网；若网络禁用了广播，可在界面中手动填写 C6 IP。监控界面会在新的记录目录中保存 `power.csv`、`depth.csv` 和原始帧文件，不会覆盖已有目录。
+## 源文件与测试
 
-## 命令选项
+- src/deck_gui.py：界面、功耗曲线、预览和操作。
+- src/deck_gui_backend.py：UDP、文本确认、统计和记录。
+- src/depth_protocol.py：共享 DPT 载荷配置/帧校验与 PDK1 重组。
+- tests/test_frame_protocol.py：协议、UDP 与录制回归。
+- ../camera_spi_mock/tools/decode_depth.py：复用同一解析器的 .bin 元数据工具；三个格式均拒绝 PGM 输出。
 
-运行 `uv run deck-gui --help` 查看 GUI 的选项；使用 `uv run deck-gui --board 192.168.137.66` 可预填 C6 IP。
+根目录执行：
 
-
-GUI 底部的“序号缺口 / 估算丢帧”按有效 DPT1 帧的 32 位序号计算：估算丢帧率 = 序号缺口 ÷（已收到帧数 + 序号缺口）。新设备或新 session 会重新开始统计；最近的乱序帧会在有限窗口内修正。此比例只覆盖本 session 中首个和最新有效帧之间的序号范围，不计开始前或结束后的未知帧，也不能区分 C6 主动丢帧和 WiFi/UDP 丢帧。
-
-## 向 Power Deck 发送 WiFi 消息
-
-1. 使用 ESP-IDF 重新构建并烧录本次 C6 固件。STM32 固件无需修改，旧的 `bench_artifacts` C6 镜像不具备消息接收功能。
-2. 运行 `uv run deck-gui`，连接 C6。留空 IP 时，需等自动发现到设备；也可以手动指定 C6 IP。
-3. 在“WiFi 消息”中输入任意文本，点击“发送消息”或按 Enter。单条上限为 512 个 UTF-8 字节，中文通常每字占 3 字节。暂不定义具体指令。
-4. 串口监视器会出现 `net_rx: PC message id=... from=... bytes=... text=...`。上位机收到板端确认后显示“板端已接收”。
-
-“已发送”只表示电脑发出了 UDP 数据报；“板端已接收”表示 C6 已处理并确认这条消息。2 秒未收到确认时提示超时，不自动重发；确认包本身丢失时，板端仍可能已经收到，可看串口核对。发送不阻塞 GUI，也可在功耗与深度图接收期间使用。断开连接时禁用发送。
-
-消息复用现有发现端口：电脑从接收 socket 向 C6 UDP 5006 单播发送 `PDMSG1`（6 字节）+ 消息 ID（4 字节小端）+ UTF-8 文本。C6 只处理当前发现租约对应的电脑 IP/端口发来的消息，返回 `PDACK1` + 相同消息 ID（共 10 字节）。消息不改变流目的地址或设备配置。“帧类型/重新烧录”仍为前端预留。
-
-板端接收入口位于 `main/Src/net_rx.c` 的 `net_rx_task()`；`receive_pc_message()` 负责消息校验、打印和确认。接收任务与发送任务独立，发送任务通过 `net_rx_get_status()` 获取目的地址快照。
-
-## GUI 文件
-
-- `src/deck_gui.py`：窗口、功耗曲线、深度预览和操作按钮。
-- `src/deck_gui_backend.py`：UDP 收发、消息确认、记录写盘和接收统计。
-- `src/depth_protocol.py`：GUI 使用的分片重组、深度帧解析和 CRC 校验。
-- `src/__init__.py`：Python 包入口，配合 `pyproject.toml` 提供 `deck-gui` 命令。
-
-源码包使用当前的 `src/` 目录。也可在 `tool/` 目录执行 `python -m src.deck_gui` 启动。
+~~~powershell
+python -m unittest discover -s tool/tests -v
+python -m unittest discover -s camera_spi_mock/tools -v
+~~~

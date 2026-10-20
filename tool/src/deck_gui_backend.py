@@ -63,7 +63,7 @@ def parse_power(packet):
 
 
 class SequenceLossEstimator:
-    """Estimate missing source frames from valid DPT1 sequence numbers."""
+    """Estimate missing source frames from valid DPT sequence numbers."""
     MASK = 0xFFFFFFFF
     HALF_RANGE = 0x80000000
 
@@ -80,6 +80,7 @@ class SequenceLossEstimator:
         self.lost = 0
         self.reordered = 0
         self.duplicates = 0
+        self._forward_span = 0
         self._history = deque()
         self._seen = set()
 
@@ -98,28 +99,33 @@ class SequenceLossEstimator:
         if self.last_seq is None:
             self.first_seq = self.last_seq = seq
             self.received = 1
-            self._remember(seq)
-            return
-        if seq in self._seen:
-            self.duplicates += 1
+            self._remember(0)
             return
 
         forward = (seq - self.last_seq) & self.MASK
-        if 0 < forward < self.HALF_RANGE:
+        if forward == 0:
+            self.duplicates += 1
+            return
+        if forward < self.HALF_RANGE:
             self.lost += forward - 1
             self.received += 1
             self.last_seq = seq
-            self._remember(seq)
+            self._forward_span += forward
+            # History uses positions across wraps, so a reused uint32 value
+            # after a complete cycle is not mistaken for an old duplicate.
+            self._remember(self._forward_span)
             return
 
         backward = (self.last_seq - seq) & self.MASK
-        observed_span = (self.last_seq - self.first_seq) & self.MASK
-        if backward <= self.reorder_window and backward <= observed_span:
-            # A late frame can fill a gap already counted within the recent window.
+        if backward <= self.reorder_window and backward <= self._forward_span:
+            position = self._forward_span - backward
+            if position in self._seen:
+                self.duplicates += 1
+                return
             if self.lost:
                 self.lost -= 1
             self.received += 1
-            self._remember(seq)
+            self._remember(position)
         else:
             self.reordered += 1
 
@@ -187,19 +193,12 @@ class CaptureRecorder:
                                 f"{value['c6_rx_ms']:010d}_{value['seq']:010d}")
                         bin_name = stem + ".bin"
                         (frames_dir / bin_name).write_bytes(value["raw"])
-                        pgm_name = ""
-                        if value["pixels"] is not None:
-                            pgm_name = stem + ".pgm"
-                            pgm = (f"P5\n{value['width']} {value['height']}\n65535\n".encode()
-                                   + b"".join(struct.pack(">H", max(0, min(65535, depth)))
-                                              for depth, _ in value["pixels"]))
-                            (frames_dir / pgm_name).write_bytes(pgm)
                         dw.writerow((host_utc, source, value["session"], value["seq"],
                                      value["camera_ms"], value["format"], value["payload_size"],
                                      value["c6_rx_ms"], value["c6_queue_ms"],
                                      f"{value['reassembly_ms']:.3f}",
                                      "frames/" + bin_name,
-                                     "frames/" + pgm_name if pgm_name else ""))
+                                     ""))
                         self.frames += 1
                 power_file.flush()
                 depth_file.flush()
