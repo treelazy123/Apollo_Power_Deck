@@ -1,74 +1,75 @@
-# Power Deck 上位机 GUI
+# Power Deck 上位机使用说明
 
-当前版本 **0.5.0**，支持 DPT 数据帧、PDK1 UDP 分片、功耗 JSON/RSSI 和文本消息。需要 Python 3.10+、Tkinter 和 uv；无第三方运行时依赖。帧定义见 [DPT 协议](../FRAME_PROTOCOL.md)。
+版本 **0.5.0**。支持功耗曲线、RSSI、DPT 帧接收/统计/记录和 WiFi 文本消息。项目交付与 Apollodeck 接入流程见 [README](../README.md)，字节接口见 [FRAME_PROTOCOL](../FRAME_PROTOCOL.md)。
 
-## 启动
+## 启动与连接
 
-在 tool 目录：
+需要 Python 3.10+（含 Tkinter）及 uv，无第三方运行时依赖。在 `tool` 目录运行：
 
 ~~~powershell
 uv run deck-gui
+# 自动发现不可用时填写 C6 的实际 IP
 uv run deck-gui --board 192.168.137.66
-# 也可用 Python
+# 也可直接使用 Python
 python -m src.deck_gui
 ~~~
 
-C6 IP 留空自动发现，也可手动输入。GUI 监听 UDP 5005、向 C6 UDP 5006 发送 PDHELLO1。Windows 防火墙需放行；广播不可用时指定 IP。避免同时运行多个争用 UDP 5005 的接收程序。
+GUI 监听 UDP 5005，定期向 C6 UDP 5006 发送 `PDHELLO1`。C6 IP 留空自动发现，也可在界面手动指定。电脑与 C6 接入同一网络，放行防火墙，并避免其他程序占用接收端口。
 
-## 协议与显示
+功耗曲线显示最近 60 s 的电压/电流/功率；RSSI 为 C6 收到热点的信号强度，有效值单位 dBm，缺少有效样本时显示“— dBm”。
 
-DPT 有效帧为 14 B 头 + 载荷 + 4 B CRC；头是 `<BBIII`，依次为 1 B magic=0x01、1 B format、4 B seq、4 B camera_ms、4 B payload_bytes。FRAME_PROFILES 只定义三个载荷长度；width/height=0、pixels=None。
+当前 format=0x01/0x02/0x03 分别为 6912/9216/14900 B **不透明载荷**，不声明像素布局，因此没有视频预览。接入真实摄像头后，需共同定义像素格式并实现解码，不能仅把载荷换成真实数据就显示图像。
 
-| format | 布局 | 有效帧 F（B） | 显示/保存 |
-|---:|---|---:|---|
-| 1 | 6912 B 不透明字节 | 6930 | 仅 .bin，无预览 |
-| 2 | 9216 B 不透明字节 | 9234 | 仅 .bin，无预览 |
-| 3 | 14900 B 不透明测试载荷，无图像宽高 | 14918 | 仅 .bin |
+## 记录与离线检查
 
-PDK1 外层保持 40 B 头、最多 1200 B 片段，传输并重组有效帧 F；SPI CRC 后的 2 B 填充不进入 UDP 或 .bin。旧录制文件和旧 bench_artifacts 镜像不自动兼容，升级须同步源端、C6 和 PC。
+点击“开始记录”，选择父目录和新的文件夹名，停止记录后检查以下内容：
 
-功耗曲线显示最近 60 秒电压/电流/功率；WiFi RSSI 卡片显示 C6 收到热点的信号强度（dBm）。功耗包没提供有效 RSSI 时显示“— dBm”。RSSI 不等于 PC 测得的 C6 上行强度。
+| 文件 | 内容 |
+|---|---|
+| `power.csv` | PC 时间、来源、C6 session、功耗序号/时间、电压、电流、功率与 RSSI |
+| `depth.csv` | 帧序号、camera_ms、format、载荷长度、C6 时间、驻留/重组耗时与文件名 |
+| `frames/*.bin` | 完整 DPT：14 B 头 + 载荷 + 4 B CRC，不含 UDP 头或 SPI 填充 |
 
-## 记录与复核
+当前不生成 PGM，`depth.csv` 的 `pgm_file` 列保留为空。记录不覆盖已有目录；写盘队列有界，磁盘跟不上时查看录制状态中的丢弃数和错误。采集目录可另附传感器型号、数据布局和标定信息。
 
-“开始记录”可自选父目录和文件夹名，在新目录保存：
+检查已录制的完整 DPT 文件，在 `tool` 目录执行：
 
-- power.csv：电脑时间、板端地址、C6 session、功耗 seq/timestamp_ms、电压/电流/功率与 rssi_dbm/rssi_valid。
-- depth.csv：seq、camera_ms、format、payload_size、C6 时间、重组耗时和文件名。
-- frames/*.bin：完整 DPT（头+载荷+CRC），无 PDK1 头；不是仅传感器 payload。
-- 三种格式均不生成 .pgm。depth.csv 的 pgm_file 列为兼容既有 CSV 表头而保留，始终为空。
+~~~powershell
+uv run deck-decode "D:/captures/session/frames/实际文件.bin"
+# 或
+python -m src.decode_depth "D:/captures/session/frames/实际文件.bin"
+~~~
 
-当前帧不声明真实/合成来源；如需记录真实/合成来源、传感器型号、标定等，随采集目录提供说明。不要根据帧头猜来源。
-
-记录目录不会覆盖已有目录。后台写盘有有界队列，磁盘跟不上时会丢弃待记录项，应检查录制状态。
+工具检查帧长、类型、格式和 CRC 并输出元数据；三个不透明格式均不支持 PGM 输出。逻辑分析仪抓取的 SPI 数据须先去除尾部填充，不能把带填充的线上数据直接作为录制帧输入。
 
 ## 统计含义
 
 | 指标 | 含义 |
 |---|---|
-| fps / 完整帧 | 成功重组的帧率/累计数，可能包含重复源帧 |
-| invalid | 消息/分片/帧解析或校验失败 |
-| incomplete | 某帧分片在默认 300 ms 内未收齐 |
-| 序号缺口 / 估算丢帧 | 按有效 DPT seq 估算端到端缺失，不能定位到具体环节 |
-| 乱序 | 超出近期修正范围的异常回退序号累计，不是 UDP 分片乱序数 |
-| 界面跳过 | 网络事件入 GUI 队列时被跳过，不等于网络丢包 |
+| fps / 完整帧 | 成功重组帧率 / 累计数，可能包含重复源帧 |
+| invalid | 消息、分片或完整帧解析/校验失败 |
+| incomplete | 分片在默认 300 ms 内未收齐 |
+| evicted | 待重组池满，提前淘汰未完成帧 |
+| 序号缺口 / 估算丢帧 | 根据有效 DPT seq 估算的端到端缺失 |
+| 乱序 | 超出近期修正范围的回退序号累计，不是 UDP 分片乱序数 |
+| 界面跳过 | GUI 事件队列跳过数据，不等于网络丢包 |
+| C6 驻留 / 电脑重组 | C6 校验后至发送的驻留时间 / 首片至重组完成的时间，均非端到端延迟 |
 
-估算丢帧率 = 序号缺口 ÷（已收到帧数 + 序号缺口）；按源 IP 和 C6 session 重新统计，只覆盖首个与最新有效序号之间，近期迟到帧可修正。N6/F103 独立重启而 C6 session 未变时，估算可能受干扰。
+估算丢帧率 = 序号缺口 ÷（已收到的唯一帧数 + 序号缺口）。按来源 IP 和 C6 session 重置，只覆盖首个与最新有效序号之间；近期迟到帧可修正缺口，重复帧不重复计入。该值不能定位具体丢帧环节，需结合 C6 串口统计。
 
-seq/camera_ms 均为 uint32：30 fps 下序号约 4.54 年回绕，毫秒计时约 49.71 天回绕；不会因此自动停止记录。camera_ms、C6 时间和 PC 时间未同步。“C6 驻留”从 C6 校验后开始，“电脑重组”从首片到完整帧，都不是完整摄像头到 PC 的延迟。
+Apollodeck 独立重启而 C6 session 未变时，序号归零可能影响乱序和丢帧估算。seq/camera_ms 都是 uint32：30 fps 下序号约 4.54 年回绕，毫秒时间约 49.71 天回绕。三端时钟未同步，不直接相减计算单向延迟。
 
-## WiFi 消息
+## WiFi 文本消息
 
-1. 源端、C6 及工具使用当前 DPT 版本，并先连接 GUI。
-2. “WiFi 消息”输入文本，点发送或 Enter，上限 512 B UTF-8。
-3. C6 串口打印 `net_rx: PC message id=... bytes=... text=...`。
-4. GUI 收到确认后显示“板端已接收”；2 秒未确认提示超时，不自动重发。
+连接 GUI 后，在“WiFi 消息”输入文本并发送，上限 512 B UTF-8。C6 串口显示 `net_rx: PC message id=... bytes=... text=...`；GUI 收到确认后显示“板端已接收”，2 s 未确认则提示超时，不自动重发。
 
-“已发送”仅表示 PC 发出数据报，“板端已接收”表示 C6 文本处理确认，不表示 N6 执行采集指令。数据包为 PDMSG1（6 B）+ uint32 小端 ID + 文本，确认 PDACK1 + 同 ID；与发现复用 UDP 5006，返回 PC 接收端口。C6 仅接受当前租约对应的 PC IP/端口。
+消息为 `PDMSG1 + uint32 小端 ID + 文本`，确认是 `PDACK1 + 同 ID`，复用 UDP 5006；C6 只接受当前租约对应的 PC IP/端口。确认表示 C6 收到了文本，不表示 Apollodeck 执行了采集指令。
 
-当前未实现 N6 采集控制、运行时帧格式切换或重新烧录；相关按钮为预留。
+Apollodeck 采集控制、运行时帧格式切换和重新烧录尚未实现，相关控件为预留。
 
-## 安装与分发
+## 分发与维护
+
+在 `tool` 目录构建并安装：
 
 ~~~powershell
 uv build
@@ -76,19 +77,10 @@ uv tool install --force .\dist\power_deck_tools-0.5.0-py3-none-any.whl
 deck-gui
 ~~~
 
-也可复制源码后 `uv tool install --force .`。不要继续使用缓存的旧版 旧帧格式 工具。进入 tool 目录运行 `uv run deck-gui --help` 查看参数。
+也可用 `uv tool install --force .` 安装源码。`uv run deck-gui --help` 可查看启动参数。
 
-## 源文件与测试
-
-- src/deck_gui.py：界面、功耗曲线、预览和操作。
-- src/deck_gui_backend.py：UDP、文本确认、统计和记录。
-- src/depth_protocol.py：共享 DPT 载荷配置/帧校验与 PDK1 重组。
-- tests/test_frame_protocol.py：协议、UDP 与录制回归。
-- ../camera_spi_mock/tools/decode_depth.py：复用同一解析器的 .bin 元数据工具；三个格式均拒绝 PGM 输出。
-
-根目录执行：
+`src/deck_gui.py` 负责界面，`src/deck_gui_backend.py` 负责接收、记录和统计，`src/depth_protocol.py` 负责协议与重组，`src/decode_depth.py` 提供离线检查。从仓库根目录运行现有自动化检查：
 
 ~~~powershell
 python -m unittest discover -s tool/tests -v
-python -m unittest discover -s camera_spi_mock/tools -v
 ~~~

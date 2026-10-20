@@ -46,7 +46,7 @@ esp_err_t depth_spi_init(void)
     if (initialized) return ESP_ERR_INVALID_STATE;
     const spi_bus_config_t bus = {
         .mosi_io_num = DEPTH_GPIO_MOSI,
-        .miso_io_num = -1, /* RX only; Apollo uses a separate CS input on GPIO4. */
+        .miso_io_num = -1, /* RX only; Apollodeck uses a separate CS input on GPIO4. */
         .sclk_io_num = DEPTH_GPIO_SCK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,

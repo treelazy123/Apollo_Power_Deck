@@ -78,5 +78,5 @@ Desktop.ini
 *.sln.docstates # Visual Studio
 
 # STM32CubeIDE generated output
-/fireware/n6/STM32CubeIDE/**/Debug/
-/fireware/n6/STM32CubeIDE/**/Release/
+/fireware/apollo_spi_master/STM32CubeIDE/**/Debug/
+/fireware/apollo_spi_master/STM32CubeIDE/**/Release/

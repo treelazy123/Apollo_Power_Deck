@@ -5,8 +5,8 @@
       "path": "fireware/power_deck"
     },
     {
-      "name": "n6",
-      "path": "fireware/n6"
+      "name": "Apollodeck",
+      "path": "fireware/apollo_spi_master"
     },
     {
       "name": "repository",

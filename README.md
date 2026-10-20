@@ -1,137 +1,195 @@
-# Power Deck
+# Power Deck 项目交付文档
 
-采集 INA226 功耗与摄像头帧，经 ESP32-C6 WiFi/UDP 发往电脑。当前链路为 **STM32F103 SPI 主机 → ESP32-C6 SPI 从机 → PC**；F103 仍产生合成载荷，真实 STM32N6 采集尚未接入。
+更新：2026-10-20。目标链路为 **Apollodeck（STM32N6，SPI 主机）→ ESP32-C6 SPI 从机 → WiFi/UDP → 电脑上位机**，同时采集和回传 INA226 功耗数据。
 
-图像协议已统一为 **DPT：14 B 帧头 + 载荷 + 4 B CRC32**，SPI 在 CRC 后另补 2 B 零字节。F103、C6 和上位机必须一起更新。字段/格式配置的统一定义见 [FRAME_PROTOCOL.md](FRAME_PROTOCOL.md)，N6 开发交接见 [N6_CAMERA_INTEGRATION.md](N6_CAMERA_INTEGRATION.md)。
+## 1. 交付范围与当前状态
 
-## 系统结构
+| 部分 | 当前能力 / 待完成事项 |
+|---|---|
+| Power Deck / C6 | SPI 从机 DMA 接收、DPT 长度/帧头/CRC 校验、功耗采样、RSSI、UDP 单播、电脑发现与文本消息确认 |
+| 电脑上位机 | 电压/电流/功率曲线、RSSI、帧率及丢帧估算、自定义目录记录、完整帧保存 |
+| Apollodeck | 工程位于 `fireware/apollo_spi_master/`；目前发送 14900 B 固定字节，**尚未按 DPT 打包，也尚未接入真实摄像头采集** |
+| 图像显示 | 当前三种 format 仅定义不透明字节长度，没有像素布局，**不能显示视频**；接入真实数据后需补充像素定义和解码 |
+| 控制功能 | WiFi 文本消息可发送并确认；Apollodeck 采集控制、运行时格式切换和上位机重新烧录尚未实现 |
+
+**现有 Apollodeck 原始字节流不能直接通过 C6 校验。** 默认 C6 要求 14920 B 的 SPI 事务，包含 DPT 头、14900 B 载荷、CRC 和填充。Apollodeck 接口适配与真实采集的任务见第 6 节。
+
+交付时记录三端使用的提交号、固件版本、接线和 format。构建通过不代表真实摄像头链路已验收。
+
+## 2. 工程目录与代码入口
 
 ~~~text
-INA226 ─I2C→ power_sample_task → 功耗队列 → power_udp ─┐
-                                                     ├→ WiFi/UDP → deck_gui
-F103 主机 ─SPI→ depth_rx_task → 完整帧队列 → depth_udp ─┘
-                    ↑                        │
-                    └──── 空闲帧索引队列 ────┘
-PC ─UDP 5006→ net_rx_task：发现、连接租约、文本消息/确认
+Power_Deck/
+├─ README.md                  交付范围、部署、任务分工与联调
+├─ FRAME_PROTOCOL.md          DPT / PDK1 字节级协议
+├─ fireware/
+│  ├─ power_deck/             ESP32-C6，ESP-IDF 工程
+│  │  ├─ CMakeLists.txt
+│  │  ├─ sdkconfig
+│  │  └─ main/
+│  │     ├─ main.c
+│  │     ├─ Inc/
+│  │     └─ Src/
+│  └─ apollo_spi_master/      Apollodeck 固件（STM32N6）
+└─ tool/                     Python 上位机
+   ├─ GUI_README.md           使用、记录与统计说明
+   ├─ src/
+   └─ tests/
 ~~~
 
-- `power_sample_task` 每 100 ms 采样，功耗 JSON 包含电压、电流、功率及 `rssi_dbm` / `rssi_valid`。
-- `depth_rx_task` 提前提交从机 DMA 缓冲，取回事务后检查实际位数、DPT 和 CRC。
-- `net_tx_task` 在功耗样本和深度分片间调度；通过线程安全快照取得 PC 地址。
-- `depth_udp` 发送 PDK1 分片；`net_rx_task` 独立监听 UDP 5006。
-- PC 监听 UDP 5005，定期发送 `PDHELLO1`；C6 按其源 IP/端口单播，租约 5 秒。
-
-## 仓库内容
-
-| 路径 | 内容 |
+| 修改入口 | 作用 |
 |---|---|
-| main/ | C6 SPI 从机、WiFi、INA226、FreeRTOS 任务、UDP 模块 |
-| camera_spi_mock/ | F103 SPI 主机模拟器、CubeMX/CMake、抓帧工具 |
-| tool/ | GUI、协议解析、UDP 收发与录制 |
-| [FRAME_PROTOCOL.md](FRAME_PROTOCOL.md) | DPT 固定头、格式配置、CRC、兼容规则 |
-| [camera_spi_mock/PROTOCOL.md](camera_spi_mock/PROTOCOL.md) | F103 接线、时序、DMA、统计与构建 |
-| [tool/GUI_README.md](tool/GUI_README.md) | GUI 安装/运行、消息、保存、测试 |
-| [N6_CAMERA_INTEGRATION.md](N6_CAMERA_INTEGRATION.md) | 真实 N6 主机采集接入流程与注意事项 |
-| [N6_SPI_ALIGNMENT.md](N6_SPI_ALIGNMENT.md) | 师兄 Apollo SPI 工程与本项目的差异、修改分工和联调清单 |
-| [BENCHMARK_MODES.md](BENCHMARK_MODES.md) | 当前载荷规模与历史镜像说明 |
-| bench_artifacts/ | **旧帧格式 / C6 主机 / F103 从机镜像，不能与当前工程混用** |
+| [deck_config.h](fireware/power_deck/main/Inc/deck_config.h) | WiFi、格式选择、SPI 引脚、帧池和功耗队列大小 |
+| [depth_spi.h](fireware/power_deck/main/Inc/depth_spi.h)、[depth_spi.c](fireware/power_deck/main/Src/depth_spi.c) | DPT 尺寸、SPI 从机描述符、帧头及 CRC 校验 |
+| [stream_tasks.c](fireware/power_deck/main/Src/stream_tasks.c) | 任务、缓冲所有权、网络调度、丢弃原因和运行统计 |
+| [power_udp.c](fireware/power_deck/main/Src/power_udp.c)、[depth_udp.c](fireware/power_deck/main/Src/depth_udp.c) | 分别发送功耗 JSON 和图像帧 UDP 分片 |
+| [net_rx.c](fireware/power_deck/main/Src/net_rx.c) | 电脑发现、接收端租约、文本消息及确认 |
+| [depth_protocol.py](tool/src/depth_protocol.py) | PC 的 DPT 校验、格式表和 PDK1 重组 |
+| [deck_gui_backend.py](tool/src/deck_gui_backend.py)、[deck_gui.py](tool/src/deck_gui.py) | 网络、记录、序号统计及界面 |
 
-## 硬件与接线
+## 3. 硬件接口与数据流
 
-| Power Deck / C6 | Apollo N6 | F103C8T6 模拟器 | 当前用途 |
-|---|---|---|---|
-| SCK / GPIO6 | PF15 / SPI5_SCK | PA5 / SPI1_SCK | STM32 输出时钟，C6 输入 |
-| MOSI / GPIO7 | PF11 / SPI5_MOSI | PA7 / SPI1_MOSI | STM32 发送数据，C6 接收 |
-| CS / GPIO4 | PA3 / SPI5_CS | PA6 / CAM_CS | 低有效片选 |
-| GND | GND | GND | 共地 |
+### 接线
 
-C6 引脚已与师兄 Apollo 工程统一为 SCK=6、MOSI=7、CS=4。原 GPIO2/MISO 不再连接；旧 F103 接线需将 PA6 的 CS 线从 C6 GPIO2 移到 GPIO4。F103 为 Half-Duplex Master、单线 TX DMA；C6 为 RX-only 从机，SPI Mode 0、8 bit、MSB first、3.3 V 电平。
+| Apollodeck / SPI5 主机 | Power Deck / C6 从机 | 作用 |
+|---|---|---|
+| PF15 / SCK | GPIO6 / SCK | Apollodeck 输出时钟 |
+| PF11 / MOSI | GPIO7 / MOSI | Apollodeck 向 C6 发送数据 |
+| PA3 / CS | GPIO4 / CS | 低有效，一次事务发送完整帧 |
+| GND | GND | 共地 |
 
-当前 APB2 72 MHz / 8 产生 SPI **9 MHz**，F103 用 33/33/34 ms 节拍实现平均目标 **30 fps**。一个 CS 事务传一帧，结束最后一位后拉高 CS；没有旧 MOSI 请求和 dummy 数据。C6 预排队最多 3 个缓冲，但**没有 READY**，重启或缓冲耗尽仍可能漏收，实际帧率需上板验证。
+SPI 使用 Mode 0、8 bit、MSB first；MISO 不使用。Power Deck 为 3.3 V 电平，连接前核对 Apollodeck 对应 VDDIO。CS 空闲高，发完整帧的最后一位后再拉高；没有命令、地址或 dummy 前缀。当前没有 READY 信号，启动、复位或缓存耗尽时可能漏帧。
 
-两端先更新再联机；禁止旧 C6 主机固件与新 F103 主机固件同时驱动 SCK/MOSI。
+Apollodeck 当前运行配置约 6.25 MHz、30 ms 发送周期，周期对应约 33.3 次/s；时钟和周期由 Apollodeck 控制。目标 30 fps 应按平均 33.33 ms 调度，不能仅修改 C6 的配置来提高源端帧率。
 
-INA226：C6 GPIO19 SDA、GPIO18 SCL，I2C 100 kHz，地址 0x40；当前按 10 mΩ 分流电阻、1 mA 电流 LSB 配置。找不到 INA226 时功耗采样关闭，深度链路仍启动。RSSI 表示 C6 收到热点的信号，不是 PC 测得的上行信号强度。
+INA226：C6 GPIO19/SDA、GPIO18/SCL，I2C 100 kHz，地址 0x40；当前按 10 mΩ 分流电阻和 1 mA 电流 LSB 配置。传感器初始化失败时，图像接收链路仍启动。
 
-## 当前格式和配置
+### 任务与缓存
 
-默认格式 3。三个格式都是不透明字节，仅载荷长度不同，不定义宽高/单位。帧头按顺序为 1 B magic、1 B format、4 B seq、4 B camera_ms、4 B payload_bytes：
-
-| format | 不透明载荷（B） | 有效帧 F（B） | SPI 线长 W（B） | UDP 分片 | 预览 |
-|---:|---:|---:|---:|---:|---|
-| 0x01 | 6912 | 6930 | 6932 | 6 | 仅 .bin |
-| 0x02 | 9216 | 9234 | 9236 | 8 | 仅 .bin |
-| 0x03 | 14900 | 14918 | 14920 | 13 | 仅 .bin |
-
-| 项目 | 配置位置 |
-|---|---|
-| F103 格式、帧率、启动等待 | camera_spi_mock/Core/Inc/camera_mock.h：CAM_TEST_FORMAT、CAM_TARGET_FPS |
-| F103 SPI 分频 | CubeMX 或 Core/Src/main.c 的 MX_SPI1_Init() |
-| C6 WiFi、格式、缓冲、引脚 | main/Inc/deck_config.h：SSID/密码、DEPTH_TEST_FORMAT、DEPTH_FRAME_COUNT |
-| C6 载荷尺寸/头长 | main/Inc/depth_spi.h |
-| PC 格式配置 | tool/src/depth_protocol.py：FRAME_PROFILES |
-
-切换 1/2/3 时修改两端相同格式号，重新构建/烧录；PC 识别表内格式。新增分辨率、单位或布局要分配新格式号并修改三端配置，不能仅改变 payload_bytes。N6 真实数据可按等长字节打包，但三个格式均不做图像解释；需要预览时新增明确像素格式。magic=0x01 表示 DPT，format 为单字节编号；其他类型/配置待定。
-
-有效帧 F=14+payload+4；SPI 线长 W=align_up(F,4)，当前在 CRC 后补 2 B 零字节。C6 RX 容量 W+4 的最后 4 B 是不发送的保护空间。UDP/.bin 只包含 F 字节。C6 不再分配整帧零数据 TX 缓冲。PDK1 外层仍是 40 B 头 + 最多 1200 B DPT 切片。
-
-## 构建与烧录
-
-### ESP32-C6
-
-使用已配置 ESP-IDF 5.5.5 的 VS Code 扩展：
-
-1. 打开根目录，目标选择 ESP32-C6。
-2. 编辑 `main/Inc/deck_config.h` 中热点 SSID/密码，电脑热点使用 2.4 GHz。
-3. 需要调整 SDK 参数时使用 SDK Configuration Editor。
-4. Build Project → Flash Device → Monitor Device，选择实际串口。
-
-输出 `build/Power_Deck.bin`；使用正常完整烧录流程，app 偏移为 0x10000。当前代码是 SPI 从机；旧 bench_artifacts 的主机固件不能使用。
-
-### STM32F103C8T6
-
-需要 CMake 3.22+、Ninja、GNU Arm 工具链。提供 Debug/Release presets：
-
-~~~powershell
-cd camera_spi_mock
-cmake --preset Debug
-cmake --build --preset Debug
+~~~text
+INA226 → power_sample_task → power_q → power_udp ─┐
+                                                ├→ net_tx_task → WiFi → PC
+Apollodeck → SPI → depth_rx_task → ready_q → depth_udp ───┘
+               ↑                         │
+               └──────── free_q ←────────┘
+PC → UDP 5006 → net_rx_task（发现、租约、文本确认）
 ~~~
 
-生成 `build/Debug/camera_spi_mock.elf` 和同名 .bin；Release 同理。可用 STM32CubeIDE/ST-Link，Flash 起始 0x08000000。CubeMX .ioc 已同步为主机、PA6 CS、仅 TX DMA。
+| C6 任务 | 优先级 | 栈分配（B） | 工作 |
+|---|---:|---:|---|
+| depth_rx_task | 6 | 4096 | 提交/取回 SPI DMA，校验后只传帧索引 |
+| power_sample_task | 5 | 3072 | 每 100 ms 采样功耗与 RSSI |
+| net_tx_task | 4 | 5120 | 调度功耗与帧分片，发送完成或丢弃后释放帧 |
+| net_rx_task | 4 | 3072 | 独立处理 UDP 接收，不阻塞发送任务 |
+| stats_task | 2 | 3072 | 每约 1 s 打印运行统计 |
 
-调试器观察 `g_camera_stats` 的 generated/started/completed、错误、超时、打包/发送耗时和 spi_hz，详细含义见 [模拟器说明](camera_spi_mock/PROTOCOL.md)。
+`power_q` 默认容纳 32 个功耗样本；`free_q` 和 `ready_q` 只保存索引，帧池默认 3 个。默认 format=3 时，每帧 DMA RX 容量 14924 B，三帧共 **44772 B**。512 KB DRAM 还要供 WiFi、LwIP、堆、栈等使用，不能全部分给图像。
 
-## 电脑上位机
+缓冲所有权固定为：`free → SPI 排队/接收 → 校验 → ready → 网络发送或丢弃 → free`。SPI 驱动持有的缓冲不能读写；网络尚未释放的缓冲不能重新提交给 SPI。等待接收结果出错不代表驱动已经归还描述符。
 
-Python 3.10+、包含 Tkinter 的 Python，以及 uv；运行时仅依赖标准库。在 tool 目录：
+## 4. 传输配置
+
+DPT 的完整字段、CRC、SPI 对齐和 UDP 外层见 [FRAME_PROTOCOL.md](FRAME_PROTOCOL.md)。概要为：
+
+~~~text
+magic(1 B) → format(1 B) → seq(4 B) → camera_ms(4 B) → payload_bytes(4 B)
+→ payload → CRC32(4 B) → SPI 尾部零填充
+~~~
+
+| format | 载荷（B） | 有效帧 F（B） | SPI 线长 W（B） | UDP 分片/帧 |
+|---:|---:|---:|---:|---:|
+| 0x01 | 6912 | 6930 | 6932 | 6 |
+| 0x02 | 9216 | 9234 | 9236 | 8 |
+| 0x03（默认） | 14900 | 14918 | 14920 | 13 |
+
+三种格式都不声明宽高、像素类型或单位。C6 由 `DEPTH_TEST_FORMAT` 选择一种固定长度；PC 可识别表内三种格式，不能仅凭 `payload_bytes` 接收任意长度。源端打包格式必须与 C6 一致；切换时同步修改并烧录两端。当前 Apollodeck 工程尚无对应的 DPT format 配置。
+
+有效帧 `F = 14 + payload_bytes + 4`；SPI 线长 `W = align_up(F, 4)`。当前都补 2 B 零；C6 再预留 4 B 不上线路的保护空间。UDP 和录制的 `.bin` 只保存 F 字节。
+
+format=3、30 fps 时，有效帧数据约 447540 B/s；加入 PDK1 头后约 463140 B/s，尚未包含 UDP/IP/WiFi 开销。6.25 MHz 下每帧纯 SPI 线时约 19.10 ms，剩余时间还要容纳采集、打包、CRC 与调度。增大真实图像尺寸前，重新核算帧长、帧池和带宽。
+
+## 5. 构建、部署与上位机
+
+### C6
+
+在已配置 **ESP-IDF 5.5.5** 的终端中，从仓库根目录进入实际工程：
 
 ~~~powershell
+cd fireware/power_deck
+idf.py build
+idf.py -p COM实际端口 flash monitor
+~~~
+
+首次配置新工程时确认目标为 `esp32c6`。烧录前修改 [deck_config.h](fireware/power_deck/main/Inc/deck_config.h) 中的热点 SSID、密码及 format。电脑热点使用 2.4 GHz。VS Code ESP-IDF 扩展也应以 `fireware/power_deck` 为工程目录。
+
+构建输出在 `fireware/power_deck/build/`，使用 ESP-IDF 完整烧录流程。Apollodeck 使用 STM32CubeIDE 构建和调试，工程位于 `fireware/apollo_spi_master/`；接口适配任务见第 6 节。
+
+### PC
+
+需要 Python 3.10+（含 Tkinter）和 uv，无第三方运行时依赖。另开终端，从仓库根目录运行：
+
+~~~powershell
+cd tool
 uv run deck-gui
-# 指定当前 C6 IP 时
+# 自动发现不可用时指定 C6 串口显示的 IP
 uv run deck-gui --board 192.168.137.66
 ~~~
 
-C6 IP 留空自动发现；广播受限时填写 IP。Windows 防火墙允许 UDP 5005。GUI 显示最近 60 秒功耗曲线、RSSI 和帧统计；三个格式均不提供图像预览。按“开始记录”选择父目录/文件夹名，保存 power.csv、depth.csv、完整 DPT .bin，三种格式均只保存 .bin，不生成 .pgm。
+PC 默认监听 UDP 5005，向 C6 UDP 5006 发送 `PDHELLO1`；C6 按来源 IP/端口单播回传，租约 5 s。放行防火墙并避免多个接收程序争用端口。RSSI 表示 C6 收到热点的信号强度。
 
-GUI WiFi 消息支持最多 512 B UTF-8 文本：PDMSG1 发往 UDP 5006，C6 打印后回 PDACK1；2 秒未确认提示超时。当前只传文本，不执行开始采集/格式切换等设备指令；“帧类型/重新烧录”仍为预留界面。接收任务栈 3072 B、优先级 4，由 stream_tasks_start 创建。
+“开始记录”可选择父目录和新文件夹名，保存 `power.csv`、`depth.csv` 和 `frames/*.bin`。`.bin` 是完整 DPT 头、载荷及 CRC，非纯像素；当前不生成预览或 PGM。详细操作、统计和离线检查见 [上位机说明](tool/GUI_README.md)。
 
-PC 工具已更新为 0.5.0，仅接收 DPT。已录制的旧帧格式 需要旧工具查看，本次不做自动转换。
+## 6. Apollodeck 开发人员接入任务
 
-## 统计与验证
+按以下顺序推进，避免同时改变物理接口、协议和采集逻辑：
 
-- C6：`depth_err_detail spi/length/header/crc`，以及 drop_reason、send_err、last_rx_bits、heap/min/dma_block。
-- `spi_wait_max_us` 包含等待主机空闲/停发，`check_max_us` 是帧校验耗时；都不能直接当端到端延迟。
-- `pool` 包含预排队的 SPI 缓冲，3 可能正常；`no_buf` 是无已排队事务且无空闲帧时的耗尽事件，不是漏帧总数。
-- drop_reason 区分 ready_full/no_wifi/no_receiver/stale/udp。启动前 no_wifi/no_receiver 的累计增长需与连接后的增量区分。
-- GUI `invalid` 为无效数据，`incomplete` 为分片重组超时。“序号缺口/估算丢帧”基于有效 DPT seq，不能单独区分源端/C6/WiFi 丢帧。
-- GUI fps 可能包含重复采集帧，真实采集率还要检查唯一 seq。独立重启源端会使序号归零，初次联调建议成组重启。
+| 阶段 | Apollodeck 侧工作 | 配套工作与通过条件 |
+|---|---|---|
+| 1. 冻结接口 | 确认板卡/传感器、引脚电平、SPI 时钟、format、采集帧长与时间戳事件 | 双方记录提交号、接线和 F/W；默认先用 format=3 |
+| 2. 适配 DPT | 在 `FSBL/Core/Src/main.c` 的发送入口打包头和 CRC；发送缓冲及长度覆盖 W，CS 包围整帧 | 当前 14900 B 固定数据只能放在 payload 区，线上须发送 14920 B；C6 `depth ok` 增长、错误无新增 |
+| 3. 打通回传 | 先降低发送频率，启动 C6 并确认 SPI 接收就绪后再启动 Apollodeck | PC 保存的同一 seq 的 payload 与源端逐字节一致，功耗/RSSI 同时正常 |
+| 4. 接入真实采集 | 传感器初始化、采集/算法、真实 payload、采集时间与序号 | 提供一帧源数据、布局说明、场景说明及对应 DPT `.bin` |
+| 5. 解释图像 | 约定像素类型、宽高、行序、通道、单位及无效值；需要解释图像时分配新 format | 同步 C6 长度配置、PC `FRAME_PROFILES` 及解码/预览；现有不透明格式不能直接显示视频 |
+| 6. 提升吞吐与恢复 | 核对采集/打包/发送耗时，逐步达到目标唯一帧率，处理发送超时/重启 | 比较源端、C6 和 PC 的计数增量；验证错误帧丢弃、GUI 断开重连及恢复 |
 
-在根目录：
+Apollodeck 当前参数入口为 [spi_link_config.h](fireware/apollo_spi_master/FSBL/Core/Inc/spi_link_config.h)，发送入口为 [main.c](fireware/apollo_spi_master/FSBL/Core/Src/main.c)。目前 `SPI_TEST_FRAME_SIZE=14900`、`SPI_TEST_PERIOD_MS=30`；仅改变长度不能完成 DPT 接入，还必须生成全部字段、CRC 和填充。现有 `image_buffer_checksum` 是本地累加和，不能替代协议 CRC32。
+
+真实采集接入须遵守以下约定：
+
+- **序号和时间戳**：每个新采集帧递增 seq，包括后续发送前被丢弃的帧；重发同一帧保持 seq 和 camera_ms。camera_ms 由 Apollodeck 在约定的采集事件记录，以帧元数据传到发送任务，不能改用发包时刻。
+- **缓冲和 DMA/cache**：分离采集、处理与发送的所有权；发送期间不得覆盖载荷。改为 DMA 后，核对 Apollodeck 的 DMA 可访问内存、缓存属性与一致性维护；确认最后一位发送结束后再结束 CS 和释放缓冲。
+- **背压与容量**：使用有界队列，记录源端丢帧。当前无 READY，延时不能保证 C6 一直可接收；若需就绪握手，由双方共同定义。UDP 分片不能解决 C6 接收整帧所需的内存。
+- **重启与计时**：Apollodeck 独立重启会让 seq 归零，而 C6 session 不变，可能干扰 PC 丢帧估算；当前联调可成组重启，正式支持需补充源端 session 设计。三端时钟未同步，不直接相减计算单向延迟。
+
+交付真实采集版本时，附构建/烧录方法、板卡与传感器型号、数据布局、完整 `.bin` 样本、采集/打包/发送/丢帧统计，以及三端相同 seq 的联调记录。
+
+## 7. 运行诊断与验收
+
+C6 串口的 `stream` 标签每约 1 s 输出累计计数。先确认 WiFi 已获得 IP、PC 已建立租约，再比较连接后约 30 s 的**增量**；启动前 no_wifi/no_receiver 的历史累计不代表连接后仍在丢帧。
+
+| 指标 | 含义 / 排查方向 |
+|---|---|
+| power ok/err/drop/tx | 有效样本 / 采样错误 / 队列或发送环节丢弃 / 本地发送成功 |
+| depth ok/err/no_buf/drop/tx | 校验有效 / 驱动或帧校验错误 / 无已排队事务且无空闲缓冲的耗尽事件 / 有效帧被主动丢弃 / 所有分片本地发送成功 |
+| depth_err_detail spi/length/header/crc | SPI 驱动错误 / 实际位数不符 / 类型、格式、长度字段或填充不符 / CRC 不符 |
+| ready_full/no_wifi/no_receiver/stale/udp | 完整帧队列满 / 网络未就绪 / 无接收端 / 帧龄超过 500 ms / UDP 发送失败 |
+| send_err / last_send_errno | socket 初始化或发送错误累计 / 最近错误码；12 为 ENOMEM，通常是发送资源暂时不足 |
+| pool / peak / power_q_peak / ready_peak | 当前占用帧数（含 SPI 预排队）/ 占用峰值 / 功耗队列峰值 / 完整帧队列峰值；pool=3 本身不代表异常 |
+| spi_wait_max_us / check_max_us | 等待 SPI 完成的最大耗时（含主机空闲）/ 帧校验最大耗时；均非端到端延迟 |
+| heap / min / dma_block / stacks | 当前空闲堆 / 历史最小空闲堆 / DMA 最大连续空闲块 / 功耗、SPI、发送三个任务的历史最小剩余栈；单位 B |
+| peer_expired / peer_wifi_lost | 因接收端租约过期 / WiFi 断开而清除接收端的次数 |
+| last_drop seq/age_ms/offset | 最近丢弃帧的序号 / 校验后驻留毫秒数 / 下一个待发送分片在 DPT 内的字节偏移 |
+| PC invalid / incomplete / evicted | 解析或校验失败 / 分片重组超时 / 重组池满而提前淘汰 |
+| PC 序号缺口 / 乱序 | 基于有效帧 seq 估算缺帧 / 超出近期修正范围的回退序号；不是 UDP 分片乱序计数 |
+
+`err` 是坏帧或驱动错误，`drop` 是已有效接收的帧没能全部发出，`no_buf` 是缓存耗尽事件而非精确丢帧数。三者均发生在 C6，但不能互相替代。`tx` 只说明 C6 本地发送成功，PC 是否收到仍要看完整帧、序号和重组统计。
+
+验收记录至少包含：三端版本、format/payload/F/W、实际 SCK/帧率、Apollodeck 采集/发送/丢弃数、C6 错误及丢弃原因增量、PC 完整帧/invalid/incomplete/序号缺口、堆与栈余量，以及一组可对应的源数据和录制文件。真实 30 fps 应核对新采集的唯一序号，不能靠重复发送同一张图验收。
+
+上位机自动化检查在仓库根目录运行：
 
 ~~~powershell
 python -m unittest discover -s tool/tests -v
-python -m unittest discover -s camera_spi_mock/tools -v
 ~~~
 
-覆盖 DPT、旧协议拒收、UDP 重组、实际 PC 接收/录制、RSSI、任意载荷字节和 CLI 拒绝 PGM。构建/软件测试不能证明硬件帧率；真实 N6 接入时还需确认摄像头布局、单位、DMA/cache、CS 和启动恢复，参见交接文档。
+协议和软件检查通过后，仍需实物验证 CS 波形、接收位数、源数据一致性与异常恢复。字节协议以 [FRAME_PROTOCOL.md](FRAME_PROTOCOL.md) 为准，上位机操作以 [tool/GUI_README.md](tool/GUI_README.md) 为准。
