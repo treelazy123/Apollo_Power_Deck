@@ -1,6 +1,6 @@
 # Power Deck 项目交付文档
 
-更新：2026-10-20。目标链路为 **Apollodeck（STM32N6，SPI 主机）→ ESP32-C6 SPI 从机 → WiFi/UDP → 电脑上位机**，同时采集和回传 INA226 功耗数据。
+目标链路为 **Apollodeck（STM32N6，SPI 主机）→ ESP32-C6 SPI 从机 → WiFi/UDP → 电脑上位机**，同时采集和回传 INA226 功耗数据。
 
 ## 1. 交付范围与当前状态
 

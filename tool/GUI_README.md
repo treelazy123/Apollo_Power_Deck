@@ -1,6 +1,6 @@
 # Power Deck 上位机使用说明
 
-版本 **0.5.0**。支持功耗曲线、RSSI、DPT 帧接收/统计/记录和 WiFi 文本消息。项目交付与 Apollodeck 接入流程见 [README](../README.md)，字节接口见 [FRAME_PROTOCOL](../FRAME_PROTOCOL.md)。
+支持功耗曲线、RSSI、DPT 帧接收/统计/记录和 WiFi 文本消息。项目交付与 Apollodeck 接入流程见 [README](../README.md)，字节接口见 [FRAME_PROTOCOL](../FRAME_PROTOCOL.md)。
 
 ## 启动与连接
 
