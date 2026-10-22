@@ -1,24 +1,14 @@
 {
   "folders": [
     {
-<<<<<<< HEAD
       "name": "Apollodeck",
       "path": "fireware/apollo_spi_master"
     },
     {
-=======
->>>>>>> origin/main
       "name": "power_deck",
       "path": "fireware/power_deck"
     },
     {
-<<<<<<< HEAD
-=======
-      "name": "Apollodeck",
-      "path": "fireware/apollo_spi_master"
-    },
-    {
->>>>>>> origin/main
       "name": "repository",
       "path": "."
     }
