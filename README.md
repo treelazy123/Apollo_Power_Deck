@@ -14,6 +14,10 @@
 
 **现有 Apollodeck 原始字节流不能直接通过 C6 校验。** 默认 C6 要求 14920 B 的 SPI 事务，包含 DPT 头、14900 B 载荷、CRC 和填充。Apollodeck 接口适配与真实采集的任务见第 6 节。
 
+<<<<<<< HEAD
+=======
+交付时记录三端使用的提交号、固件版本、接线和 format。构建通过不代表真实摄像头链路已验收。
+>>>>>>> origin/main
 
 ## 2. 工程目录与代码入口
 
@@ -59,7 +63,11 @@ Power_Deck/
 
 SPI 使用 Mode 0、8 bit、MSB first；MISO 不使用。Power Deck 为 3.3 V 电平，连接前核对 Apollodeck 对应 VDDIO。CS 空闲高，发完整帧的最后一位后再拉高；没有命令、地址或 dummy 前缀。当前没有 READY 信号，启动、复位或缓存耗尽时可能漏帧。
 
+<<<<<<< HEAD
 Apollodeck 当前运行配置约 6.25 MHz、30 ms 发送周期，周期对应约 33.3 次/s；时钟和周期由 Apollodeck 控制。
+=======
+Apollodeck 当前运行配置约 6.25 MHz、30 ms 发送周期，周期对应约 33.3 次/s；时钟和周期由 Apollodeck 控制。目标 30 fps 应按平均 33.33 ms 调度，不能仅修改 C6 的配置来提高源端帧率。
+>>>>>>> origin/main
 
 INA226：C6 GPIO19/SDA、GPIO18/SCL，I2C 100 kHz，地址 0x40；当前按 10 mΩ 分流电阻和 1 mA 电流 LSB 配置。传感器初始化失败时，图像接收链路仍启动。
 
@@ -111,6 +119,7 @@ format=3、30 fps 时，有效帧数据约 447540 B/s；加入 PDK1 头后约 46
 
 ### C6
 
+<<<<<<< HEAD
 **C6 建议单独用一个 VS Code 窗口打开 `fireware/power_deck` 文件夹**（实际目录名为 `power_deck`），按以下步骤操作：
 
 1. 烧录前修改工程内的 `main/Inc/deck_config.h`（[仓库内链接](fireware/power_deck/main/Inc/deck_config.h)），设置热点 SSID、密码及 format。电脑热点使用 2.4 GHz。当前 `sdkconfig` 已配置目标为 `esp32c6`；首次配置或目标不符时，通过 `ESP-IDF: Set Espressif Device Target` 选择 `esp32c6`。
@@ -138,21 +147,59 @@ python -m src.deck_gui --board 192.168.137.66
 
 后续开发若引入第三方依赖，建议用 uv 统一管理虚拟环境和依赖，在 `tool` 目录通过 `uv run deck_gui` 安装依赖并启动；当前已安装 uv 时也可使用此命令。
 
+=======
+在已配置 **ESP-IDF 5.5.5** 的终端中，从仓库根目录进入实际工程：
+
+~~~powershell
+cd fireware/power_deck
+idf.py build
+idf.py -p COM实际端口 flash monitor
+~~~
+
+首次配置新工程时确认目标为 `esp32c6`。烧录前修改 [deck_config.h](fireware/power_deck/main/Inc/deck_config.h) 中的热点 SSID、密码及 format。电脑热点使用 2.4 GHz。VS Code ESP-IDF 扩展也应以 `fireware/power_deck` 为工程目录。
+
+构建输出在 `fireware/power_deck/build/`，使用 ESP-IDF 完整烧录流程。Apollodeck 使用 STM32CubeIDE 构建和调试，工程位于 `fireware/apollo_spi_master/`；接口适配任务见第 6 节。
+
+### PC
+
+需要 Python 3.10+（含 Tkinter）和 uv，无第三方运行时依赖。另开终端，从仓库根目录运行：
+
+~~~powershell
+cd tool
+uv run deck-gui
+# 自动发现不可用时指定 C6 串口显示的 IP
+uv run deck-gui --board 192.168.137.66
+~~~
+
+>>>>>>> origin/main
 PC 默认监听 UDP 5005，向 C6 UDP 5006 发送 `PDHELLO1`；C6 按来源 IP/端口单播回传，租约 5 s。放行防火墙并避免多个接收程序争用端口。RSSI 表示 C6 收到热点的信号强度。
 
 “开始记录”可选择父目录和新文件夹名，保存 `power.csv`、`depth.csv` 和 `frames/*.bin`。`.bin` 是完整 DPT 头、载荷及 CRC，非纯像素；当前不生成预览或 PGM。详细操作、统计和离线检查见 [上位机说明](tool/GUI_README.md)。
 
+<<<<<<< HEAD
 ## 6. 接入任务
+=======
+## 6. Apollodeck 开发人员接入任务
+>>>>>>> origin/main
 
 按以下顺序推进，避免同时改变物理接口、协议和采集逻辑：
 
 | 阶段 | Apollodeck 侧工作 | 配套工作与通过条件 |
 |---|---|---|
+<<<<<<< HEAD
 | 1. 适配 DPT | 在 `FSBL/Core/Src/main.c` 的发送入口打包头和 CRC；发送缓冲及长度覆盖 W，CS 包围整帧 | 当前 14900 B 固定数据只能放在 payload 区，线上须发送 14920 B；C6 `depth ok` 增长、错误无新增 |
 | 2. 打通回传 | 先降低发送频率，启动 C6 并确认 SPI 接收就绪后再启动 Apollodeck | PC 保存的同一 seq 的 payload 与源端逐字节一致，功耗/RSSI 同时正常 |
 | 3. 接入真实采集 | 传感器初始化、采集/算法、真实 payload、采集时间与序号 | 提供一帧源数据、布局说明、场景说明及对应 DPT `.bin` |
 | 4. 解释图像 | 约定像素类型、宽高、行序、通道、单位及无效值；需要解释图像时分配新 format | 同步 C6 长度配置、PC `FRAME_PROFILES` 及解码/预览；现有不透明格式不能直接显示视频 |
 | 5. 提升吞吐与恢复 | 核对采集/打包/发送耗时，逐步达到目标唯一帧率，处理发送超时/重启 | 比较源端、C6 和 PC 的计数增量；验证错误帧丢弃、GUI 断开重连及恢复 |
+=======
+| 1. 冻结接口 | 确认板卡/传感器、引脚电平、SPI 时钟、format、采集帧长与时间戳事件 | 双方记录提交号、接线和 F/W；默认先用 format=3 |
+| 2. 适配 DPT | 在 `FSBL/Core/Src/main.c` 的发送入口打包头和 CRC；发送缓冲及长度覆盖 W，CS 包围整帧 | 当前 14900 B 固定数据只能放在 payload 区，线上须发送 14920 B；C6 `depth ok` 增长、错误无新增 |
+| 3. 打通回传 | 先降低发送频率，启动 C6 并确认 SPI 接收就绪后再启动 Apollodeck | PC 保存的同一 seq 的 payload 与源端逐字节一致，功耗/RSSI 同时正常 |
+| 4. 接入真实采集 | 传感器初始化、采集/算法、真实 payload、采集时间与序号 | 提供一帧源数据、布局说明、场景说明及对应 DPT `.bin` |
+| 5. 解释图像 | 约定像素类型、宽高、行序、通道、单位及无效值；需要解释图像时分配新 format | 同步 C6 长度配置、PC `FRAME_PROFILES` 及解码/预览；现有不透明格式不能直接显示视频 |
+| 6. 提升吞吐与恢复 | 核对采集/打包/发送耗时，逐步达到目标唯一帧率，处理发送超时/重启 | 比较源端、C6 和 PC 的计数增量；验证错误帧丢弃、GUI 断开重连及恢复 |
+>>>>>>> origin/main
 
 Apollodeck 当前参数入口为 [spi_link_config.h](fireware/apollo_spi_master/FSBL/Core/Inc/spi_link_config.h)，发送入口为 [main.c](fireware/apollo_spi_master/FSBL/Core/Src/main.c)。目前 `SPI_TEST_FRAME_SIZE=14900`、`SPI_TEST_PERIOD_MS=30`；仅改变长度不能完成 DPT 接入，还必须生成全部字段、CRC 和填充。现有 `image_buffer_checksum` 是本地累加和，不能替代协议 CRC32。
 

@@ -4,6 +4,7 @@
 
 ## 启动与连接
 
+<<<<<<< HEAD
 需要 Python 3.10+（含 Tkinter）。**当前项目没有第三方运行依赖，直接运行源码时可以省略 uv。** 在 `tool` 目录运行（macOS 通常将 `python` 换成 `python3`）：
 
 ~~~powershell
@@ -14,6 +15,18 @@ python -m src.deck_gui --board 192.168.137.66
 
 后续开发若需要第三方依赖，建议将依赖记录在 `pyproject.toml` 并提交 `uv.lock`，使用 uv 统一管理虚拟环境和依赖；届时用户可在 `tool` 目录通过 `uv run deck_gui` 自动安装所需依赖并启动。当前已安装 uv 的用户也可以使用该命令。
 
+=======
+需要 Python 3.10+（含 Tkinter）及 uv，无第三方运行时依赖。在 `tool` 目录运行：
+
+~~~powershell
+uv run deck-gui
+# 自动发现不可用时填写 C6 的实际 IP
+uv run deck-gui --board 192.168.137.66
+# 也可直接使用 Python
+python -m src.deck_gui
+~~~
+
+>>>>>>> origin/main
 GUI 监听 UDP 5005，定期向 C6 UDP 5006 发送 `PDHELLO1`。C6 IP 留空自动发现，也可在界面手动指定。电脑与 C6 接入同一网络，放行防火墙，并避免其他程序占用接收端口。
 
 功耗曲线显示最近 60 s 的电压/电流/功率；RSSI 为 C6 收到热点的信号强度，有效值单位 dBm，缺少有效样本时显示“— dBm”。
@@ -69,6 +82,7 @@ Apollodeck 采集控制、运行时帧格式切换和重新烧录尚未实现，
 
 ## 分发与维护
 
+<<<<<<< HEAD
 ### 方式一：直接运行源码（推荐）
 
 准备 Python 3.10+（含 Tkinter），拿到 `tool/` 源码后，在该目录运行：
@@ -104,6 +118,17 @@ deck_gui
 如果找不到 `deck_gui`，执行 `uv tool update-shell` 后重新打开终端。参见 [uv 工具安装说明](https://docs.astral.sh/uv/guides/tools/)。
 
 ### 源码维护与检查
+=======
+在 `tool` 目录构建并安装：
+
+~~~powershell
+uv build
+uv tool install --force .\dist\power_deck_tools-0.5.0-py3-none-any.whl
+deck-gui
+~~~
+
+也可用 `uv tool install --force .` 安装源码。`uv run deck-gui --help` 可查看启动参数。
+>>>>>>> origin/main
 
 `src/deck_gui.py` 负责界面，`src/deck_gui_backend.py` 负责接收、记录和统计，`src/depth_protocol.py` 负责协议与重组，`src/decode_depth.py` 提供离线检查。从仓库根目录运行现有自动化检查：
 

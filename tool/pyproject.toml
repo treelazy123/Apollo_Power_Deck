@@ -11,7 +11,11 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
+<<<<<<< HEAD
 deck_gui = "src.deck_gui:main"
+=======
+deck-gui = "src.deck_gui:main"
+>>>>>>> origin/main
 deck-decode = "src.decode_depth:main"
 
 [tool.hatch.build.targets.wheel]
