@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "power-deck-tools"
+version = "0.5.0"
+description = "Power Deck desktop GUI for monitoring, recording, and WiFi messages"
+readme = "GUI_README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+deck_gui = "src.deck_gui:main"
+deck-decode = "src.decode_depth:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

@@ -1,0 +1,21 @@
+{
+  "folders": [
+    {
+      "name": "Apollodeck",
+      "path": "fireware/apollo_spi_master"
+    },
+    {
+      "name": "power_deck",
+      "path": "fireware/power_deck"
+    },
+    {
+      "name": "repository",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "cmake.configureOnOpen": false,
+    "cmake.configureOnEdit": false,
+    "cmake.automaticReconfigure": false
+  }
+}
