@@ -1,4 +1,5 @@
 #include <string.h>
+#include "freertos/FreeRTOS.h"
 #include "Inc/depth_spi.h"
 #include "driver/spi_slave.h"
 #include "driver/gpio.h"

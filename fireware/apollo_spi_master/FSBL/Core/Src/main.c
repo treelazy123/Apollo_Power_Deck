@@ -25,6 +25,7 @@
 /* USER CODE BEGIN Includes */
 
 #include "spi_link_config.h"
+#include "dpt_frame.h"
 
 /* USER CODE END Includes */
 
@@ -53,6 +54,9 @@ static volatile uint32_t spi_frames_attempted = 0U;
 static volatile uint32_t spi_frames_sent = 0U;
 static volatile uint32_t spi_errors = 0U;
 static volatile uint32_t image_buffer_checksum = 0U;
+static volatile uint32_t last_frame_sequence = 0U;
+static volatile uint32_t last_frame_camera_ms = 0U;
+static volatile uint32_t last_frame_crc32 = 0U;
 
 /* USER CODE END PV */
 
@@ -117,10 +121,10 @@ int main(void)
 #endif
 
   static const uint8_t test_pattern[] = {0x00U, 0x01U, 0x10U, 0x11U};
-  for (uint32_t i = 0U; i < SPI_TEST_FRAME_SIZE; i++)
+  for (uint32_t i = 0U; i < SPI_TEST_PAYLOAD_SIZE; i++)
   {
-    image_buffer[i] = test_pattern[i % sizeof(test_pattern)];
-    image_buffer_checksum += image_buffer[i];
+    image_buffer[SPI_DPT_HEADER_SIZE + i] = test_pattern[i % sizeof(test_pattern)];
+    image_buffer_checksum += image_buffer[SPI_DPT_HEADER_SIZE + i];
   }
 
   /* Let the ESP32 boot and queue its first SPI slave DMA transaction. */
@@ -131,9 +135,15 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   uint32_t next_frame = HAL_GetTick();
+  uint32_t frame_sequence = 0U;
 
   while (1)
   {
+    /* Synthetic frame-generation time; real capture must supply its timestamp. */
+    last_frame_sequence = frame_sequence++;
+    last_frame_camera_ms = HAL_GetTick();
+    last_frame_crc32 = dpt_frame_finalize(image_buffer, last_frame_sequence,
+                                         last_frame_camera_ms);
     spi_frames_attempted++;
     last_spi_status = Send_Image();
     if (last_spi_status != HAL_OK)
@@ -311,7 +321,7 @@ static HAL_StatusTypeDef Send_Image(void)
   HAL_GPIO_WritePin(SPI5_CS_GPIO_Port, SPI5_CS_Pin, GPIO_PIN_RESET);
 #endif
 
-  /* Send one short, easily decoded test frame. */
+  /* Send 14918 DPT bytes plus two zero padding bytes in one CS transaction. */
   status = HAL_SPI_Transmit(&hspi5, image_buffer,
                             (uint16_t)SPI_TEST_FRAME_SIZE, 1000U);
 
